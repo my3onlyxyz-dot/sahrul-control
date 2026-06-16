@@ -9,8 +9,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_root_checker: ^1.0.0
-  root_access: ^1.0.0
+  cupertino_icons: ^1.0.8
 
 dev_dependencies:
   flutter_test:
