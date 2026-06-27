@@ -493,6 +493,51 @@ fi
       run('setprop persist.thermal.config default && echo OK');
   static Future<String> thermal() => run('getprop persist.thermal.config');
 
+  // ===== MATIKAN LAYAR =====
+  // Mengirim event tombol power (keycode 26) lewat input subsistem.
+  // Setara menekan tombol power fisik sekali — layar langsung mati.
+  static Future<String> screenOff() =>
+      run('input keyevent 26 && echo OK');
+
+  // ===== DOUBLE TAP TO WAKE =====
+  // Beberapa vendor (termasuk Infinix/Transsion-XOS) suka menonaktifkan
+  // sendiri opsi "double tap to wake" secara otomatis (reset saat reboot,
+  // update sistem, atau optimasi baterai). Fungsi ini menulis ulang ke
+  // SEMUA key umum yang dipakai vendor berbeda sekaligus supaya
+  // pengaktifan lebih tahan terhadap reset otomatis tersebut.
+  static Future<String> enableDoubleTapWake() => run('''
+    settings put secure double_tap_to_wake 1 2>/dev/null
+    settings put system double_tap_to_wake 1 2>/dev/null
+    settings put global double_tap_to_wake 1 2>/dev/null
+    settings put secure gesture_double_tap_to_wake 1 2>/dev/null
+    settings put system gesture_double_tap_to_wake 1 2>/dev/null
+    setprop persist.sys.gesture.dt2w 1 2>/dev/null
+    echo OK''');
+
+  static Future<String> disableDoubleTapWake() => run('''
+    settings put secure double_tap_to_wake 0 2>/dev/null
+    settings put system double_tap_to_wake 0 2>/dev/null
+    settings put global double_tap_to_wake 0 2>/dev/null
+    settings put secure gesture_double_tap_to_wake 0 2>/dev/null
+    settings put system gesture_double_tap_to_wake 0 2>/dev/null
+    setprop persist.sys.gesture.dt2w 0 2>/dev/null
+    echo OK''');
+
+  // Cek status — coba beberapa key karena beda vendor pakai key berbeda.
+  static Future<String> doubleTapWakeStatus() async {
+    final keys = [
+      'settings get secure double_tap_to_wake',
+      'settings get system double_tap_to_wake',
+      'settings get secure gesture_double_tap_to_wake',
+      'settings get system gesture_double_tap_to_wake',
+    ];
+    for (final k in keys) {
+      final r = await run(k);
+      if (!bad(r) && r.trim() == '1') return '1';
+    }
+    return '0';
+  }
+
   // ===== DISABLE THERMAL TOTAL =====
   // Mematikan semua thermal throttling: thermal-engine service (MediaTek/QCOM),
   // mtk_thermal, dan node thermal_zone mode. Disimpan flag agar UI tahu status.
@@ -1308,6 +1353,15 @@ class ToolsTab extends StatelessWidget {
         const SizedBox(height: 12),
         _rebootCard(context),
         const SizedBox(height: 22),
+        _sectionTitle('LAYAR & GESTURE', kTeal),
+        const SizedBox(height: 12),
+        _toolTile(Icons.power_settings_new_rounded, 'Matikan Layar',
+            'Sama seperti menekan tombol power', kTeal, () {
+          runAction(RootService.screenOff, ok: '✅ Layar dimatikan');
+        }),
+        const SizedBox(height: 10),
+        const _DoubleTapWakeTile(),
+        const SizedBox(height: 22),
         _sectionTitle('LAINNYA', kGreen),
         const SizedBox(height: 12),
         _toolTile(Icons.developer_mode_rounded, 'Buka Pengaturan Developer',
@@ -1472,6 +1526,123 @@ class ToolsTab extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+// ============================================================
+// DOUBLE TAP TO WAKE TILE
+// ============================================================
+// Beberapa HP (terutama Infinix/Transsion) suka menonaktifkan sendiri
+// opsi "ketuk 2 kali untuk membangunkan" setelah reboot/update. Widget
+// ini menampilkan status terkini dan tombol "Aktifkan Ulang" yang bisa
+// ditekan sewaktu-waktu kalau fiturnya ke-disable otomatis lagi.
+class _DoubleTapWakeTile extends StatefulWidget {
+  const _DoubleTapWakeTile();
+  @override
+  State<_DoubleTapWakeTile> createState() => _DoubleTapWakeTileState();
+}
+
+class _DoubleTapWakeTileState extends State<_DoubleTapWakeTile> {
+  bool? _active;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final s = await RootService.doubleTapWakeStatus();
+    if (mounted) setState(() { _active = s == '1'; _loading = false; });
+  }
+
+  Future<void> _toggle() async {
+    setState(() => _loading = true);
+    final on = _active != true;
+    final res = on
+        ? await RootService.enableDoubleTapWake()
+        : await RootService.disableDoubleTapWake();
+    if (!mounted) return;
+    if (RootService.bad(res)) {
+      _showSnack(context, on
+          ? '⚠️ Gagal mengaktifkan. Pastikan root aktif.'
+          : '⚠️ Gagal menonaktifkan. Pastikan root aktif.');
+    } else {
+      _showSnack(context, on
+          ? '✅ Ketuk 2x untuk bangun diaktifkan'
+          : '✅ Ketuk 2x untuk bangun dinonaktifkan');
+    }
+    await _refresh();
+  }
+
+  void _showSnack(BuildContext context, String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), backgroundColor: kPanel2),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final on = _active == true;
+    return ValueListenableBuilder<bool>(
+      valueListenable: busyNotifier,
+      builder: (_, busy, __) => Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+            color: kPanel,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: kBorder)),
+        child: Row(children: [
+          Container(
+            padding: const EdgeInsets.all(11),
+            decoration: BoxDecoration(
+                color: glow(kTeal, .1), borderRadius: BorderRadius.circular(13)),
+            child: Icon(Icons.touch_app_rounded, color: kTeal, size: 22),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Ketuk 2x untuk Bangun',
+                  style: TextStyle(
+                      color: kWhite, fontSize: 14, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 3),
+              Text(
+                _loading
+                    ? 'Memeriksa status...'
+                    : (on
+                        ? 'Aktif — sering ter-disable sendiri di HP ini'
+                        : 'Nonaktif — tekan untuk mengaktifkan'),
+                style: TextStyle(
+                    color: _loading ? mut(.45) : (on ? kGreen : mut(.5)),
+                    fontSize: 11.5),
+              ),
+            ]),
+          ),
+          const SizedBox(width: 10),
+          if (_loading)
+            const SizedBox(
+                width: 20, height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2, color: kTeal))
+          else
+            ElevatedButton(
+              onPressed: busy ? null : _toggle,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: glow(kTeal, .15),
+                foregroundColor: kTeal,
+                disabledBackgroundColor: mut(.05),
+                disabledForegroundColor: mut(.3),
+                side: BorderSide(color: busy ? Colors.transparent : kTeal),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11)),
+                elevation: 0,
+              ),
+              child: Text(on ? 'Aktif ✓' : 'Aktifkan',
+                  style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold)),
+            ),
+        ]),
+      ),
     );
   }
 }
