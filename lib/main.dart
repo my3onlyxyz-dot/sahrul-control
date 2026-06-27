@@ -382,35 +382,14 @@ class RootService {
             'echo $g > /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor 2>/dev/null')
         .join('\n');
 
-    // ===== KHUSUS MEDIATEK (Dimensity) =====
-    // MediaTek punya lapisan PPM (Power & Performance Management) yang diam-diam
-    // menurunkan clock meski cpufreq sudah di-set performance. Untuk benar-benar
-    // lock maksimal, PPM harus dimatikan dulu (untuk performance), lalu tiap
-    // cluster dikunci ke max-nya MASING-MASING (prime 3.1GHz, big 3.0GHz,
-    // little 2.0GHz) — bukan disamakan ke cpu0 yang cuma cluster little 2GHz.
-    String mtkPart;
-    if (g == 'performance') {
-      mtkPart = '''
-        # Matikan semua PPM policy (disable power-saving yang menurunkan clock)
-        if [ -f /proc/ppm/policy_status ]; then
-          NUM=\$(grep -c "" /proc/ppm/policy_status 2>/dev/null)
-          i=0
-          while [ \$i -lt 20 ]; do echo "\$i 0" > /proc/ppm/policy_status 2>/dev/null; i=\$((i+1)); done
-        fi
-        # Mode performa MediaTek (1 = performance, 0 = normal)
-        echo 1 > /proc/cpufreq/cpufreq_power_mode 2>/dev/null
-        # Nonaktifkan thermal throttle limiter MediaTek (sementara) bila ada
-        echo 0 > /proc/ppm/enabled 2>/dev/null
-      ''';
-    } else {
-      mtkPart = '''
-        # Kembalikan PPM & power mode ke normal
-        echo 0 > /proc/cpufreq/cpufreq_power_mode 2>/dev/null
-        echo 1 > /proc/ppm/enabled 2>/dev/null
-      ''';
-    }
-
-    // Bagian frekuensi: tiap policy dikunci ke max/min cluster-nya sendiri.
+    // Bagian frekuensi.
+    // PERBAIKAN PENTING (terbukti dari tes di device):
+    //  - scaling_max_freq HARUS ditulis SEBELUM scaling_min_freq. Kalau min
+    //    ditulis lebih dulu ke nilai > max yang berlaku, kernel menolak →
+    //    inilah yang dulu bikin clock mentok (min/max gagal naik).
+    //  - Governor di-set lebih dulu, baru frekuensi.
+    //  - Path MediaTek /proc/ppm & /proc/cpufreq tidak ada di device ini,
+    //    jadi dihapus total (sebelumnya cuma sia-sia).
     String freqPart;
     if (g == 'performance') {
       freqPart = '''
@@ -419,6 +398,7 @@ class RootService {
           echo performance > "\$P/scaling_governor" 2>/dev/null
           MAXF=\$(cat "\$P/cpuinfo_max_freq" 2>/dev/null)
           if [ -n "\$MAXF" ]; then
+            # Urutan benar: naikkan max DULU, baru kunci min = max.
             echo "\$MAXF" > "\$P/scaling_max_freq" 2>/dev/null
             echo "\$MAXF" > "\$P/scaling_min_freq" 2>/dev/null
           fi
@@ -430,17 +410,35 @@ class RootService {
           echo $g > "\$P/scaling_governor" 2>/dev/null
           MINF=\$(cat "\$P/cpuinfo_min_freq" 2>/dev/null)
           MAXF=\$(cat "\$P/cpuinfo_max_freq" 2>/dev/null)
-          [ -n "\$MAXF" ] && echo "\$MAXF" > "\$P/scaling_max_freq" 2>/dev/null
+          # Urutan benar: turunkan min DULU, baru buka max ke batas penuh.
           [ -n "\$MINF" ] && echo "\$MINF" > "\$P/scaling_min_freq" 2>/dev/null
+          [ -n "\$MAXF" ] && echo "\$MAXF" > "\$P/scaling_max_freq" 2>/dev/null
         done''';
     }
 
     return run('''
-$mtkPart
 $freqPart
 $perCpu
-RESULT=\$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
-if [ "\$RESULT" = "$g" ]; then echo OK; else echo "FAIL:\$RESULT"; fi
+# Verifikasi: cek prime cluster (policy7) benar-benar naik ke max-nya.
+PRIME=/sys/devices/system/cpu/cpufreq/policy7
+if [ -d "\$PRIME" ]; then
+  CURMAX=\$(cat "\$PRIME/scaling_max_freq" 2>/dev/null)
+  HWMAX=\$(cat "\$PRIME/cpuinfo_max_freq" 2>/dev/null)
+  GOVNOW=\$(cat "\$PRIME/scaling_governor" 2>/dev/null)
+else
+  CURMAX=\$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null)
+  HWMAX=\$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null)
+  GOVNOW=\$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
+fi
+if [ "\$GOVNOW" = "$g" ]; then
+  if [ "$g" = "performance" ] && [ "\$CURMAX" != "\$HWMAX" ]; then
+    echo "PARTIAL:\$CURMAX/\$HWMAX"
+  else
+    echo OK
+  fi
+else
+  echo "FAIL:\$GOVNOW"
+fi
 ''');
   }
 
@@ -647,6 +645,14 @@ Future<void> runAction(Future<String> Function() action,
       showToast(actual.isEmpty
           ? '⚠️ Mode tidak didukung kernel device ini.'
           : '⚠️ Ditolak kernel. Aktif sekarang: "$actual"');
+    } else if (r.startsWith('PARTIAL:')) {
+      // Governor performance aktif, tapi max belum 100% (kemungkinan thermal
+      // throttle menahan). Tampilkan progres jujur dalam MHz.
+      final parts = r.substring(8).trim().split('/');
+      final cur = (int.tryParse(parts.isNotEmpty ? parts[0] : '0') ?? 0) ~/ 1000;
+      final hw = (int.tryParse(parts.length > 1 ? parts[1] : '0') ?? 0) ~/ 1000;
+      showToast('⚡ Performa aktif: $cur MHz (batas $hw MHz). '
+          'Thermal menahan — matikan thermal untuk penuh.');
     } else {
       showToast(ok);
     }
