@@ -500,110 +500,48 @@ fi
       run('input keyevent 26 && echo OK');
 
   // ===== DOUBLE TAP TO WAKE =====
-  // PERBAIKAN: di banyak device MediaTek (termasuk Helio P65 di Infinix
-  // GT 20 Pro), "Settings.Secure/System" untuk double_tap_to_wake HANYA
-  // menyimpan nilai di database — sensor gesture sendiri tidak pernah
-  // dikabari karena driver membaca dari NODE SYSFS terpisah, bukan dari
-  // settings provider. Inilah sebabnya versi sebelumnya tidak berefek
-  // sama sekali walau "berhasil" menulis settings.
+  // Khusus Infinix/Tecno (Transsion OS): key yang BENAR & AMAN adalah
+  // `os_action_tapping_wake` di tabel SYSTEM. Ini terbukti dari pemeriksaan
+  // langsung di device — saat fitur diaktifkan dari menu Pengaturan bawaan,
+  // hanya key inilah yang berubah jadi 1.
   //
-  // Fungsi ini sekarang menulis ke SEMUA kemungkinan lapisan sekaligus:
-  //  1. Node sysfs gesture driver MediaTek/umum (paling menentukan)
-  //  2. Settings provider (untuk UI sistem yang membaca dari sana)
-  //  3. setprop persist (beberapa ROM membaca dari sini saat boot)
+  // PENTING: kita TIDAK menulis ke node sysfs touchscreen (Goodix) lagi.
+  // Pada device ini, menulis ke node power/wakeup touchscreen MEMICU REBOOT.
+  // Menulis via settings provider jauh lebih aman dan itulah jalur resmi
+  // yang dibaca framework Transsion untuk mengaktifkan gesture wake.
+  //
+  // Masalah "sering ke-disable sendiri" diatasi dengan menulis ke beberapa
+  // key terkait sekaligus + key AOSP sebagai cadangan, lalu app bisa
+  // memanggil reapply() bila perlu.
   static Future<String> enableDoubleTapWake() => run('''
-    FOUND=0
-    for NODE in \
-      /proc/tpd/gesture_switch \
-      /proc/tpd \
-      /sys/class/gesture/gesture/enable \
-      /sys/class/touch/touch_dev/double_tap \
-      /sys/class/sensors/dt_gesture/enable \
-      /sys/devices/virtual/touchscreen/touchscreen_gesture/enable \
-      /sys/touchscreen/dt2w \
-      /sys/devices/virtual/misc/touch/double_tap; do
-      if [ -e "\$NODE" ]; then
-        echo 1 > "\$NODE" 2>/dev/null && FOUND=1
-      fi
-    done
-    settings put secure double_tap_to_wake 1 2>/dev/null
+    settings put system os_action_tapping_wake 1 2>/dev/null
     settings put system double_tap_to_wake 1 2>/dev/null
-    settings put global double_tap_to_wake 1 2>/dev/null
+    settings put secure double_tap_to_wake 1 2>/dev/null
     settings put secure gesture_double_tap_to_wake 1 2>/dev/null
-    settings put system gesture_double_tap_to_wake 1 2>/dev/null
-    setprop persist.sys.gesture.dt2w 1 2>/dev/null
-    setprop persist.vendor.gesture.dt2w 1 2>/dev/null
-    if [ "\$FOUND" = "1" ]; then echo OK; else echo "OK_NOSYSFS"; fi''');
+    RESULT=\$(settings get system os_action_tapping_wake 2>/dev/null)
+    if [ "\$RESULT" = "1" ]; then echo OK; else echo "FAIL:\$RESULT"; fi''');
 
   static Future<String> disableDoubleTapWake() => run('''
-    for NODE in \
-      /proc/tpd/gesture_switch \
-      /sys/class/gesture/gesture/enable \
-      /sys/class/touch/touch_dev/double_tap \
-      /sys/class/sensors/dt_gesture/enable \
-      /sys/devices/virtual/touchscreen/touchscreen_gesture/enable \
-      /sys/touchscreen/dt2w \
-      /sys/devices/virtual/misc/touch/double_tap; do
-      [ -e "\$NODE" ] && echo 0 > "\$NODE" 2>/dev/null
-    done
-    settings put secure double_tap_to_wake 0 2>/dev/null
+    settings put system os_action_tapping_wake 0 2>/dev/null
     settings put system double_tap_to_wake 0 2>/dev/null
-    settings put global double_tap_to_wake 0 2>/dev/null
+    settings put secure double_tap_to_wake 0 2>/dev/null
     settings put secure gesture_double_tap_to_wake 0 2>/dev/null
-    settings put system gesture_double_tap_to_wake 0 2>/dev/null
-    setprop persist.sys.gesture.dt2w 0 2>/dev/null
-    setprop persist.vendor.gesture.dt2w 0 2>/dev/null
     echo OK''');
 
-  // Cek status — utamakan node sysfs (sumber kebenaran sebenarnya di
-  // kernel), baru fallback ke settings provider kalau node tidak ada.
+  // Status dibaca dari key Transsion yang benar.
   static Future<String> doubleTapWakeStatus() async {
-    final nodes = [
-      '/proc/tpd/gesture_switch',
-      '/sys/class/gesture/gesture/enable',
-      '/sys/class/touch/touch_dev/double_tap',
-      '/sys/class/sensors/dt_gesture/enable',
-      '/sys/devices/virtual/touchscreen/touchscreen_gesture/enable',
-      '/sys/touchscreen/dt2w',
-      '/sys/devices/virtual/misc/touch/double_tap',
-    ];
-    for (final n in nodes) {
-      final r = await run('[ -e "$n" ] && cat "$n" 2>/dev/null');
-      if (!bad(r) && r.trim() == '1') return '1';
-      if (!bad(r) && r.trim() == '0') return '0';
-    }
-    final keys = [
-      'settings get secure double_tap_to_wake',
-      'settings get system double_tap_to_wake',
-      'settings get secure gesture_double_tap_to_wake',
-      'settings get system gesture_double_tap_to_wake',
-    ];
-    for (final k in keys) {
-      final r = await run(k);
-      if (!bad(r) && r.trim() == '1') return '1';
-    }
+    final r = await run('settings get system os_action_tapping_wake');
+    if (!bad(r) && r.trim() == '1') return '1';
     return '0';
   }
 
-  // Cek apakah ada node sysfs yang terdeteksi sama sekali. Kalau tidak
-  // ada satupun, kemungkinan besar device ini mengontrol gesture lewat
-  // jalur tertutup vendor (HAL biner) yang tidak bisa diakses dari shell
-  // root biasa — UI perlu memberi tahu user soal ini secara jujur.
+  // Key Transsion ini SELALU tersedia di Infinix/Tecno, jadi fitur dianggap
+  // didukung. (Tidak lagi bergantung pada node sysfs yang berisiko.)
   static Future<bool> doubleTapWakeNodeExists() async {
-    final nodes = [
-      '/proc/tpd/gesture_switch',
-      '/sys/class/gesture/gesture/enable',
-      '/sys/class/touch/touch_dev/double_tap',
-      '/sys/class/sensors/dt_gesture/enable',
-      '/sys/devices/virtual/touchscreen/touchscreen_gesture/enable',
-      '/sys/touchscreen/dt2w',
-      '/sys/devices/virtual/misc/touch/double_tap',
-    ];
-    for (final n in nodes) {
-      final r = await run('[ -e "$n" ] && echo FOUND');
-      if (!bad(r) && r.trim() == 'FOUND') return true;
-    }
-    return false;
+    final r = await run('settings get system os_action_tapping_wake');
+    // Walau nilainya "null"/0, key-nya tetap bisa di-set; anggap didukung
+    // selama shell bisa membaca settings (root aktif).
+    return !bad(r);
   }
 
   // ===== DISABLE THERMAL TOTAL =====
@@ -1645,18 +1583,10 @@ class _DoubleTapWakeTileState extends State<_DoubleTapWakeTile> {
         ? await RootService.enableDoubleTapWake()
         : await RootService.disableDoubleTapWake();
     if (!mounted) return;
-    if (RootService.bad(res)) {
+    if (RootService.bad(res) || res.startsWith('FAIL:')) {
       _showSnack(context, on
           ? '⚠️ Gagal mengaktifkan. Pastikan root aktif.'
           : '⚠️ Gagal menonaktifkan. Pastikan root aktif.');
-    } else if (res.trim() == 'OK_NOSYSFS') {
-      // Settings provider berhasil ditulis, tapi tidak ada satupun node
-      // sysfs gesture yang ditemukan di device ini. Artinya kontrol
-      // gesture kemungkinan ada di HAL biner tertutup vendor — jujur
-      // beritahu user supaya tidak bingung kalau gesture tetap mati.
-      _showSnack(context, on
-          ? '⚠️ Setting ditulis, tapi sensor gesture device ini tidak terjangkau dari root shell. Coba aktifkan juga lewat Pengaturan > Gestur.'
-          : '✅ Setting dinonaktifkan');
     } else {
       _showSnack(context, on
           ? '✅ Ketuk 2x untuk bangun diaktifkan'
@@ -1680,10 +1610,10 @@ class _DoubleTapWakeTileState extends State<_DoubleTapWakeTile> {
       subtitle = 'Memeriksa status...';
       subtitleColor = mut(.45);
     } else if (!_nodeExists) {
-      subtitle = 'Sensor gesture tidak terjangkau dari root di HP ini';
+      subtitle = 'Tidak didukung (akses root nonaktif?)';
       subtitleColor = kYellow;
     } else if (on) {
-      subtitle = 'Aktif — sering ter-disable sendiri di HP ini';
+      subtitle = 'Aktif — ketuk 2x layar saat mati untuk bangun';
       subtitleColor = kGreen;
     } else {
       subtitle = 'Nonaktif — tekan untuk mengaktifkan';
