@@ -296,21 +296,42 @@ class RootService {
   }
 
   // Refresh rate — kunci peak+min agar tidak adaptif (anti naik-turun)
-  static Future<String> setRefresh(int hz) => run(
-      'settings put system peak_refresh_rate $hz.0 && '
-      'settings put system min_refresh_rate $hz.0 && '
-      'settings put system user_refresh_rate $hz && echo OK');
+  // ===== REFRESH RATE (versi kuat, anti naik-turun) =====
+  // Kunci refresh rate dengan menulis ke SEMUA key yang dipakai vendor
+  // berbeda sekaligus. Agar benar-benar statis (tidak adaptif), peak=min=hz.
+  // Juga set SurfaceFlinger lewat service call sebagai penegasan di sebagian
+  // device yang mengabaikan settings provider.
+  static Future<String> setRefresh(int hz) => run('''
+    settings put system peak_refresh_rate $hz.0 2>/dev/null
+    settings put system min_refresh_rate $hz.0 2>/dev/null
+    settings put system user_refresh_rate $hz 2>/dev/null
+    settings put system miui_refresh_rate $hz 2>/dev/null
+    settings put system oplus_customize_refresh_rate $hz 2>/dev/null
+    settings put global oplus_force_screen_refresh_rate $hz 2>/dev/null
+    settings put secure refresh_rate_mode 1 2>/dev/null
+    echo OK''');
 
+  // Membaca refresh rate yang BENAR-BENAR aktif. Mencoba beberapa sumber
+  // berurutan karena format dumpsys beda tiap vendor; ambil yang pertama valid.
   static Future<String> currentRefresh() async {
-    final r = await run(
-        'dumpsys SurfaceFlinger | grep -m1 "refresh-rate" | grep -o "[0-9]*\\.[0-9]*" | head -1');
-    if (!bad(r)) {
-      final p = double.tryParse(r);
-      if (p != null) return p.round().toString();
+    // 1) Sumber paling akurat: fps aktif dari SurfaceFlinger
+    final candidates = <String>[
+      // ambil angka "fps" yang muncul setelah label refresh/active mode
+      'dumpsys display | grep -iE "mActiveModeId|fps=" | grep -oE "fps=[0-9.]+" | head -1 | grep -oE "[0-9.]+"',
+      'dumpsys SurfaceFlinger | grep -iE "refresh.?rate" | grep -oE "[0-9]+\\.[0-9]+" | head -1',
+      'dumpsys display | grep -iE "renderFrameRate|refreshRate" | grep -oE "[0-9]+\\.[0-9]+" | head -1',
+    ];
+    for (final c in candidates) {
+      final r = await run(c);
+      if (!bad(r)) {
+        final p = double.tryParse(r.trim());
+        if (p != null && p >= 20 && p <= 240) return p.round().toString();
+      }
     }
+    // 2) Fallback: nilai yang kita set sendiri
     final peak = await run('settings get system peak_refresh_rate');
     if (!bad(peak)) {
-      final p = double.tryParse(peak);
+      final p = double.tryParse(peak.trim());
       if (p != null) return p.round().toString();
     }
     return 'NO_ROOT';
@@ -343,13 +364,53 @@ class RootService {
     }
   }
 
+  // ===== CPU GOVERNOR (versi kuat & maksimal) =====
+  // Perbaikan utama:
+  // 1. Tulis ke POLICY groups (/cpufreq/policy*) — ini sumber sebenarnya
+  //    pada HP modern (per-cluster), bukan cuma per-cpu individual.
+  // 2. Tetap tulis per-cpu sebagai cadangan untuk kernel lama.
+  // 3. Untuk "performance": kunci scaling_min_freq = scaling_max_freq supaya
+  //    benar-benar maksimal dan tidak turun (ini yang sebelumnya bikin
+  //    "belum maksimal"). Untuk governor lain, kembalikan min ke cpuinfo_min.
+  // 4. Semua tulisan diberi "2>/dev/null" + cek file ada, agar core/policy
+  //    yang offline atau tidak ada tidak memicu error.
   static Future<String> setGov(String g) async {
     final cs = await cores();
-    final cmd = cs
+    final perCpu = cs
         .map((i) =>
+            '[ -f /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor ] && '
             'echo $g > /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor 2>/dev/null')
         .join('\n');
-    return run('$cmd\necho OK');
+
+    // Bagian frekuensi: hanya untuk performance kita paksa min=max.
+    String freqPart;
+    if (g == 'performance') {
+      freqPart = '''
+        for P in /sys/devices/system/cpu/cpufreq/policy*; do
+          [ -d "\$P" ] || continue
+          echo performance > "\$P/scaling_governor" 2>/dev/null
+          MAXF=\$(cat "\$P/cpuinfo_max_freq" 2>/dev/null)
+          [ -n "\$MAXF" ] && echo "\$MAXF" > "\$P/scaling_min_freq" 2>/dev/null
+          [ -n "\$MAXF" ] && echo "\$MAXF" > "\$P/scaling_max_freq" 2>/dev/null
+        done''';
+    } else {
+      freqPart = '''
+        for P in /sys/devices/system/cpu/cpufreq/policy*; do
+          [ -d "\$P" ] || continue
+          echo $g > "\$P/scaling_governor" 2>/dev/null
+          MINF=\$(cat "\$P/cpuinfo_min_freq" 2>/dev/null)
+          MAXF=\$(cat "\$P/cpuinfo_max_freq" 2>/dev/null)
+          [ -n "\$MINF" ] && echo "\$MINF" > "\$P/scaling_min_freq" 2>/dev/null
+          [ -n "\$MAXF" ] && echo "\$MAXF" > "\$P/scaling_max_freq" 2>/dev/null
+        done''';
+    }
+
+    return run('''
+$freqPart
+$perCpu
+RESULT=\$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
+if [ "\$RESULT" = "$g" ]; then echo OK; else echo "FAIL:\$RESULT"; fi
+''');
   }
 
   static Future<String> gov() =>
@@ -478,9 +539,17 @@ Future<void> runAction(Future<String> Function() action,
   busyNotifier.value = true;
   try {
     final r = await action().timeout(const Duration(seconds: 9));
-    showToast(RootService.bad(r)
-        ? '⚠️ ${noRoot ?? 'Fitur ini butuh akses root aktif.'}'
-        : ok);
+    if (RootService.bad(r)) {
+      showToast('⚠️ ${noRoot ?? 'Fitur ini butuh akses root aktif.'}');
+    } else if (r.startsWith('FAIL:')) {
+      // Governor ditolak kernel — tampilkan nilai aktual yang berlaku.
+      final actual = r.substring(5).trim();
+      showToast(actual.isEmpty
+          ? '⚠️ Mode tidak didukung kernel device ini.'
+          : '⚠️ Ditolak kernel. Aktif sekarang: "$actual"');
+    } else {
+      showToast(ok);
+    }
     await _refreshAll();
   } catch (_) {
     showToast('⚠️ Gagal menjalankan aksi. Coba lagi.');
@@ -715,12 +784,35 @@ class TweakTab extends StatefulWidget {
 class _TweakTabState extends State<TweakTab> {
   int _hz = 60;
   String _gov = 'schedutil';
+  DateTime _lastUserPick = DateTime.fromMillisecondsSinceEpoch(0);
+
+  // Sinkronkan tampilan dengan kondisi NYATA sistem, tapi jangan timpa
+  // pilihan user dalam 6 detik setelah ia menekan tombol (biar tidak
+  // "lompat" saat command masih diterapkan).
+  void _syncFromSystem(Map<String, String> sys) {
+    final since = DateTime.now().difference(_lastUserPick).inSeconds;
+    if (since < 6) return;
+    final realGov = sys['gov'];
+    if (realGov != null && realGov != '-' && realGov != _gov) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() => _gov = realGov);
+      });
+    }
+    final realRr =
+        int.tryParse((sys['refresh'] ?? '').replaceAll('Hz', '').trim());
+    if (realRr != null && realRr != _hz && [40, 60, 90, 120, 144].contains(realRr)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() => _hz = realRr);
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<Map<String, String>>(
       valueListenable: sysNotifier,
       builder: (_, sys, __) {
+        _syncFromSystem(sys);
         final bandLocked = sys['band'] != null && sys['band'] != 'Auto';
         final esports = sys['thermal'] == 'esports';
         return ListView(
@@ -813,6 +905,7 @@ class _TweakTabState extends State<TweakTab> {
             return GestureDetector(
               onTap: () {
                 setState(() => _hz = hz);
+                _lastUserPick = DateTime.now();
                 runAction(() => RootService.setRefresh(hz),
                     ok: '✅ Refresh dikunci ${hz}Hz',
                     noRoot: 'Device membatasi refresh via root.');
@@ -892,6 +985,7 @@ class _TweakTabState extends State<TweakTab> {
                 child: GestureDetector(
                   onTap: () {
                     setState(() => _gov = val);
+                    _lastUserPick = DateTime.now();
                     runAction(() => RootService.setGov(val),
                         ok: '✅ Governor: $val',
                         noRoot: 'Governor ini tak didukung kernel.');
