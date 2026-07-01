@@ -10,61 +10,237 @@ void main() {
       statusBarColor: Colors.transparent,
       statusBarIconBrightness: Brightness.light,
     ));
-    runApp(const WelcomeSahrulApp());
-  }, (error, stack) {
-    debugPrint('Uncaught (diredam, app tetap jalan): $error');
-  });
+    runApp(const SahrulApp());
+  }, (e, s) => debugPrint('ERR: $e'));
+}
+
+// TEMA GLOBAL
+final isNightNotifier = ValueNotifier<bool>(true);
+final isRootNotifier  = ValueNotifier<bool>(false);
+bool get _night => isNightNotifier.value;
+bool get _root  => isRootNotifier.value;
+
+const kCyan   = Color(0xFF00E5FF);
+const kGreen  = Color(0xFF34C759);
+const kYellow = Color(0xFFE6A700);
+const kRed    = Color(0xFFFF4747);
+const kOrange = Color(0xFFFF6B47);
+const kPurple = Color(0xFFB47FFF);
+const kTeal   = Color(0xFF13B5A6);
+const kBlue   = Color(0xFF3D8EFF);
+const kPink   = Color(0xFFFF2D78);
+
+Color get kBg     => _night ? const Color(0xFF060612) : const Color(0xFFF0F2F8);
+Color get kPanel  => _night ? const Color(0xFF0D0D20) : const Color(0xFFFFFFFF);
+Color get kPanel2 => _night ? const Color(0xFF12122A) : const Color(0xFFE8EAF2);
+Color get kBorder => _night ? const Color(0xFF1A1A38) : const Color(0xFFDDE0EC);
+Color get kWhite  => _night ? Colors.white : const Color(0xFF080818);
+Color mut(double o) => _night
+    ? Colors.white.withOpacity(o)
+    : const Color(0xFF080818).withOpacity(o.clamp(0.05, 0.9));
+Color glow(Color c, double o) => c.withOpacity(o);
+
+// ROOT HELPERS
+Future<bool> checkRoot() async {
+  try {
+    final r = await Process.run('su', ['-c', 'id']);
+    return r.stdout.toString().contains('uid=0');
+  } catch (_) { return false; }
+}
+
+Future<String> runRoot(String cmd) async {
+  if (!_root) return 'NO_ROOT';
+  try {
+    final r = await Process.run('su', ['-c', 'sh -c ${_shellQuote(cmd)}']);
+    final out = r.stdout.toString().trim();
+    final err = r.stderr.toString().trim();
+    if (out.isNotEmpty) return out;
+    if (err.isNotEmpty) return 'ERR: $err';
+    return 'OK';
+  } catch (e) { return 'ERROR: $e'; }
+}
+
+String _shellQuote(String s) => "'${s.replaceAll("'", "'\\''")}'";
+
+Future<String> readSys(String path) async {
+  try {
+    final s = (await File(path).readAsString()).trim();
+    if (s.isNotEmpty) return s;
+  } catch (_) {}
+  if (_root) {
+    try {
+      final r = await Process.run('su', ['-c', 'cat "$path"']);
+      final out = r.stdout.toString().trim();
+      if (out.isNotEmpty &&
+          !out.contains('Permission denied') &&
+          !out.contains('No such file')) {
+        return out;
+      }
+    } catch (_) {}
+  }
+  return '';
+}
+
+// Baca properti Android (getprop) — jalan tanpa root
+Future<String> getProp(String key) async {
+  try {
+    final r = await Process.run('getprop', [key]);
+    return r.stdout.toString().trim();
+  } catch (_) {
+    if (_root) {
+      final out = await runRoot('getprop $key');
+      if (out != 'OK' && !out.startsWith('ERR')) return out;
+    }
+    return '';
+  }
 }
 
 // ============================================================
-// PALET "FLIGHT DECK" + DUKUNGAN NIGHT / LIGHT
+// DEVICE INFO — deteksi otomatis kemampuan HP
 // ============================================================
-// Notifier global untuk mode tema. true = night (default), false = light.
-final isNightNotifier = ValueNotifier<bool>(true);
-bool get _night => isNightNotifier.value;
+class DeviceInfo {
+  static final DeviceInfo i = DeviceInfo._();
+  DeviceInfo._();
 
-// Warna AKSEN tetap (sama di kedua mode — sudah cerah & kontras).
-const kCyan     = Color(0xFF00E5FF);
-const kGreen    = Color(0xFF34C759);
-const kYellow   = Color(0xFFE6A700);
-const kRed      = Color(0xFFFF4747);
-const kOrange   = Color(0xFFFF6B47);
-const kPurple   = Color(0xFFB47FFF);
-const kTeal     = Color(0xFF13B5A6);
+  String model = '---';
+  String brand = '---';
+  String platform = '---';
+  String androidVer = '---';
+  String cpuArch = '---';
+  int cpuCores = 0;
 
-// Warna PERMUKAAN/TEKS — dinamis mengikuti mode.
-Color get kBg     => _night ? const Color(0xFF0A0A0F) : const Color(0xFFF2F4F8);
-Color get kPanel  => _night ? const Color(0xFF12121A) : const Color(0xFFFFFFFF);
-Color get kPanel2 => _night ? const Color(0xFF161622) : const Color(0xFFEDEFF5);
-Color get kBorder => _night ? const Color(0xFF1E1E2E) : const Color(0xFFE2E5EC);
-Color get kWhite  => _night ? Colors.white : const Color(0xFF12121A);
+  // Nama tampilan final setelah validasi silang brand vs hardware asli.
+  String displayName = '---';
+  bool spoofSuspected = false; // true kalau brand tidak konsisten dgn chipset
 
-// Teks samar (mengikuti mode supaya tetap terbaca di light).
-Color mut(double o) => _night
-    ? Colors.white.withOpacity(o)
-    : const Color(0xFF12121A).withOpacity(o.clamp(0.0, 1.0) * 0.9 + 0.05);
-Color glow(Color c, double o) => c.withOpacity(o);
+  // Kemampuan yang terdeteksi
+  List<String> governors = [];      // governor yang didukung
+  List<int> freqsKhz = [];          // daftar frekuensi (kHz)
+  String? thermalPath;              // path zone suhu CPU yang valid
+  String? batteryTempPath;          // path suhu baterai
+  String? dt2wPath;                 // path gesture double-tap-to-wake
+  bool hasCpuFreq = false;
 
-// ============================================================
-// APP ROOT
-// ============================================================
-class WelcomeSahrulApp extends StatelessWidget {
-  const WelcomeSahrulApp({super.key});
+  bool loaded = false;
+
+  Future<void> detect() async {
+    // Info dasar via getprop (tanpa root)
+    model      = await getProp('ro.product.model');
+    brand      = await getProp('ro.product.manufacturer');
+    platform   = await getProp('ro.board.platform');
+    androidVer = await getProp('ro.build.version.release');
+    cpuArch    = await getProp('ro.product.cpu.abi');
+
+    if (model.isEmpty) model = '---';
+    if (brand.isEmpty) brand = '---';
+    if (platform.isEmpty) platform = '---';
+    if (androidVer.isEmpty) androidVer = '---';
+
+    // ===== VALIDASI SILANG BRAND vs HARDWARE ASLI =====
+    // `ro.product.manufacturer`/`model` gampang dipalsukan modul spoofing.
+    // `ro.board.platform` (chipset) jauh lebih sulit dipalsukan karena
+    // dibaca driver kernel langsung, bukan cuma properti sistem. Kalau
+    // brand mengaku vendor yang TIDAK PERNAH memakai chipset ini (misal
+    // "Apple" tapi board MediaTek/Qualcomm), brand dianggap tidak valid
+    // dan kita pakai fallback yang jujur.
+    final platformLower = platform.toLowerCase();
+    final brandLower = brand.toLowerCase();
+    final looksMediatek = platformLower.contains('mt') || platformLower.startsWith('k6');
+    final looksQualcomm = platformLower.contains('sm') || platformLower.contains('msm') || platformLower.contains('kona') || platformLower.contains('lahaina');
+    final claimsApple = brandLower.contains('apple') || model.toLowerCase().contains('iphone');
+
+    spoofSuspected = claimsApple && (looksMediatek || looksQualcomm);
+
+    if (spoofSuspected) {
+      // Chipset asli tidak bisa berupa Apple Silicon di board Android —
+      // ini pasti spoof. Tampilkan nama yang jujur berbasis chipset.
+      displayName = 'Android (chipset $platform)';
+    } else if (model == '---' && brand == '---') {
+      displayName = 'Perangkat tidak dikenal';
+    } else {
+      displayName = '$brand $model';
+    }
+
+    // Jumlah core CPU
+    cpuCores = 0;
+    for (int c = 0; c < 16; c++) {
+      final exists = await readSys('/sys/devices/system/cpu/cpu$c/cpufreq/scaling_cur_freq');
+      if (exists.isNotEmpty) cpuCores++;
+      else if (c > 0) break;
+    }
+    if (cpuCores == 0) cpuCores = 1;
+
+    // Governor yang tersedia
+    final govRaw = await readSys('/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors');
+    governors = govRaw.split(RegExp(r'\s+')).where((g) => g.isNotEmpty).toList();
+    hasCpuFreq = governors.isNotEmpty ||
+        (await readSys('/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq')).isNotEmpty;
+
+    // Frekuensi yang tersedia
+    final freqRaw = await readSys('/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies');
+    freqsKhz = freqRaw.split(RegExp(r'\s+'))
+        .map((f) => int.tryParse(f) ?? 0)
+        .where((f) => f > 0).toList()..sort();
+
+    // Cari thermal zone CPU yang valid
+    for (int z = 0; z < 20; z++) {
+      final t = await readSys('/sys/class/thermal/thermal_zone$z/temp');
+      final n = int.tryParse(t) ?? 0;
+      if (n > 20000 && n < 100000) { thermalPath = '/sys/class/thermal/thermal_zone$z/temp'; break; }
+    }
+
+    // Cari path suhu baterai
+    for (final p in [
+      '/sys/class/power_supply/battery/temp',
+      '/sys/class/power_supply/mtk-gauge/temp',
+      '/sys/class/power_supply/bms/temp',
+    ]) {
+      if ((await readSys(p)).isNotEmpty) { batteryTempPath = p; break; }
+    }
+
+    // Cari path DT2W (gesture wake) di berbagai vendor touch
+    for (final p in [
+      '/sys/devices/platform/goodix_ts.0/gesture/enable',
+      '/proc/touchpanel/double_tap_enable',
+      '/sys/touchpanel/double_tap',
+      '/sys/devices/virtual/touch/tp_dev/gesture_on',
+      '/proc/tp_gesture',
+    ]) {
+      if ((await readSys(p)).isNotEmpty) { dt2wPath = p; break; }
+    }
+
+    loaded = true;
+  }
+
+  // Buat 3-4 pilihan frekuensi representatif dari daftar yang ada
+  List<int> get freqChoices {
+    if (freqsKhz.isEmpty) return [];
+    final n = freqsKhz.length;
+    if (n <= 4) return freqsKhz.reversed.toList();
+    return [
+      freqsKhz[n - 1],          // max
+      freqsKhz[(n * 2 ~/ 3)],   // tinggi
+      freqsKhz[(n ~/ 3)],       // sedang
+      freqsKhz[0],              // min
+    ];
+  }
+}
+
+// APP
+class SahrulApp extends StatelessWidget {
+  const SahrulApp({super.key});
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
       valueListenable: isNightNotifier,
       builder: (_, night, __) => MaterialApp(
-        title: 'Welcome Sahrul',
+        title: 'Command Center',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           useMaterial3: true,
           scaffoldBackgroundColor: kBg,
-          fontFamily: 'sans-serif',
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: kCyan,
-            brightness: night ? Brightness.dark : Brightness.light,
-          ),
+          colorScheme: ColorScheme.fromSeed(seedColor: kCyan,
+              brightness: night ? Brightness.dark : Brightness.light),
         ),
         home: const SplashScreen(),
       ),
@@ -72,104 +248,191 @@ class WelcomeSahrulApp extends StatelessWidget {
   }
 }
 
-// ============================================================
 // SPLASH
-// ============================================================
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
   @override
   State<SplashScreen> createState() => _SplashScreenState();
 }
 
-class _SplashScreenState extends State<SplashScreen>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _c;
+class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMixin {
+  late AnimationController _main, _orbit;
+  late Animation<double> _scale, _fade, _progress;
+  String _status = 'Initializing...';
 
   @override
   void initState() {
     super.initState();
-    _c = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 1400))
-      ..forward();
-    Timer(const Duration(milliseconds: 1900), () {
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          PageRouteBuilder(
-            transitionDuration: const Duration(milliseconds: 500),
-            pageBuilder: (_, a, __) =>
-                FadeTransition(opacity: a, child: const RootShell()),
-          ),
-        );
-      }
-    });
+    _main  = AnimationController(vsync: this, duration: const Duration(milliseconds: 2000))..forward();
+    _orbit = AnimationController(vsync: this, duration: const Duration(seconds: 8))..repeat();
+    _scale    = CurvedAnimation(parent: _main, curve: const Interval(0.0, 0.5, curve: Curves.elasticOut));
+    _fade     = CurvedAnimation(parent: _main, curve: const Interval(0.4, 1.0, curve: Curves.easeOut));
+    _progress = CurvedAnimation(parent: _main, curve: Curves.easeInOut);
+    _initApp();
+  }
+
+  Future<void> _initApp() async {
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (mounted) setState(() => _status = 'Checking root...');
+    final hasRoot = await checkRoot();
+    isRootNotifier.value = hasRoot;
+    if (mounted) setState(() => _status = hasRoot ? 'Root detected ✓' : 'Non-root mode');
+    await Future.delayed(const Duration(milliseconds: 500));
+    if (mounted) setState(() => _status = 'Detecting device...');
+    await DeviceInfo.i.detect();
+    if (mounted) setState(() => _status = DeviceInfo.i.displayName);
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (mounted) {
+      Navigator.pushReplacement(context, PageRouteBuilder(
+        transitionDuration: const Duration(milliseconds: 600),
+        pageBuilder: (_, a, __) => FadeTransition(opacity: a, child: const RootShell()),
+      ));
+    }
   }
 
   @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
+  void dispose() { _main.dispose(); _orbit.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: kBg,
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ScaleTransition(
-              scale: CurvedAnimation(parent: _c, curve: Curves.elasticOut),
-              child: Container(
-                width: 92,
-                height: 92,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  gradient: const LinearGradient(
-                    colors: [kCyan, Color(0xFF0090A8)],
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                        color: glow(kCyan, .45),
-                        blurRadius: 36,
-                        spreadRadius: 2),
-                  ],
-                ),
-                child: const Icon(Icons.bolt_rounded,
-                    color: Colors.black, size: 48),
-              ),
+      backgroundColor: const Color(0xFF060612),
+      body: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        AnimatedBuilder(
+          animation: Listenable.merge([_main, _orbit]),
+          builder: (_, __) => Stack(alignment: Alignment.center, children: [
+            Transform.rotate(
+              angle: _orbit.value * 6.28318,
+              child: SizedBox(width: 160, height: 160,
+                  child: CustomPaint(painter: _OrbitPainter(_orbit.value))),
             ),
-            const SizedBox(height: 24),
-            FadeTransition(
-              opacity: _c,
-              child: Text('Welcome Sahrul',
-                  style: TextStyle(
-                      color: kWhite,
-                      fontSize: 24,
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -.5)),
-            ),
-            const SizedBox(height: 6),
-            FadeTransition(
-              opacity: _c,
-              child: Text('DEVICE CONTROL CENTER',
-                  style: TextStyle(
-                      color: glow(kCyan, .7),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 3)),
-            ),
-          ],
+            Opacity(opacity: _scale.value,
+              child: Container(width: 118 + 6 * (_orbit.value % 1), height: 118 + 6 * (_orbit.value % 1),
+                decoration: BoxDecoration(shape: BoxShape.circle,
+                    border: Border.all(color: kCyan.withOpacity(0.1), width: 1)))),
+            ScaleTransition(scale: _scale, child: _AppIcon(size: 92)),
+          ]),
         ),
-      ),
+        const SizedBox(height: 36),
+        FadeTransition(opacity: _fade, child: Column(children: [
+          Text('SAHRUL', style: TextStyle(color: kCyan, fontSize: 28,
+              fontWeight: FontWeight.w900, letterSpacing: 8)),
+          const SizedBox(height: 4),
+          Text('COMMAND CENTER', style: TextStyle(
+              color: Colors.white.withOpacity(0.3), fontSize: 10,
+              fontWeight: FontWeight.w600, letterSpacing: 5)),
+          const SizedBox(height: 28),
+          SizedBox(width: 160, child: AnimatedBuilder(
+            animation: _progress,
+            builder: (_, __) => Column(children: [
+              LinearProgressIndicator(value: _progress.value, minHeight: 2,
+                backgroundColor: Colors.white.withOpacity(0.06),
+                valueColor: const AlwaysStoppedAnimation(kCyan),
+                borderRadius: BorderRadius.circular(2)),
+              const SizedBox(height: 10),
+              Text(_status, style: TextStyle(color: Colors.white.withOpacity(0.35),
+                  fontSize: 11, fontFamily: 'monospace')),
+            ]),
+          )),
+        ])),
+      ])),
     );
   }
 }
 
-// ============================================================
-// ROOT SHELL — bottom nav 4 tab
-// ============================================================
+// APP ICON — Hexagon chip / processor
+class _AppIcon extends StatelessWidget {
+  final double size;
+  const _AppIcon({required this.size});
+  @override
+  Widget build(BuildContext context) => Container(
+    width: size, height: size,
+    decoration: BoxDecoration(
+      shape: BoxShape.circle,
+      gradient: const RadialGradient(center: Alignment(-0.3, -0.3),
+        colors: [Color(0xFF1C1C44), Color(0xFF080816)]),
+      boxShadow: [
+        BoxShadow(color: kCyan.withOpacity(.35), blurRadius: 26, spreadRadius: 1),
+        BoxShadow(color: kPurple.withOpacity(.18), blurRadius: 46, spreadRadius: -6),
+      ],
+    ),
+    child: CustomPaint(painter: _IconPainter(), size: Size(size, size)),
+  );
+}
+
+class _IconPainter extends CustomPainter {
+  double _c(double a) => 1 - a*a/2 + a*a*a*a/24 - a*a*a*a*a*a/720;
+  double _s(double a) => a - a*a*a/6 + a*a*a*a*a/120 - a*a*a*a*a*a*a/5040;
+  Offset _hex(double cx, double cy, double r, int i) {
+    final a = (i * 60 - 90) * 3.14159265 / 180;
+    return Offset(cx + r * _c(a), cy + r * _s(a));
+  }
+  @override
+  void paint(Canvas canvas, Size s) {
+    final cx = s.width / 2, cy = s.height / 2;
+    final rOuter = s.width * 0.34, rInner = s.width * 0.16;
+    final legPaint = Paint()..color = kCyan.withOpacity(.5)
+      ..strokeWidth = s.width * 0.022..strokeCap = StrokeCap.round;
+    final padPaint = Paint()..color = kCyan.withOpacity(.7);
+    for (int i = 0; i < 6; i++) {
+      final inner = _hex(cx, cy, rOuter, i);
+      final outer = _hex(cx, cy, rOuter + s.width * 0.1, i);
+      canvas.drawLine(inner, outer, legPaint);
+      canvas.drawCircle(outer, s.width * 0.026, padPaint);
+    }
+    final hexPath = Path();
+    for (int i = 0; i < 6; i++) {
+      final p = _hex(cx, cy, rOuter, i);
+      i == 0 ? hexPath.moveTo(p.dx, p.dy) : hexPath.lineTo(p.dx, p.dy);
+    }
+    hexPath.close();
+    canvas.drawPath(hexPath, Paint()..shader = LinearGradient(
+        begin: Alignment.topLeft, end: Alignment.bottomRight,
+        colors: [kCyan.withOpacity(.18), kPurple.withOpacity(.08)])
+      .createShader(Rect.fromCircle(center: Offset(cx, cy), radius: rOuter)));
+    canvas.drawPath(hexPath, Paint()..style = PaintingStyle.stroke
+      ..strokeWidth = s.width * 0.028..strokeJoin = StrokeJoin.round
+      ..color = kCyan..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2));
+    final corePath = Path();
+    for (int i = 0; i < 6; i++) {
+      final p = _hex(cx, cy, rInner, i);
+      i == 0 ? corePath.moveTo(p.dx, p.dy) : corePath.lineTo(p.dx, p.dy);
+    }
+    corePath.close();
+    canvas.drawPath(corePath, Paint()..shader =
+      RadialGradient(colors: [kCyan, const Color(0xFF0080A0)])
+        .createShader(Rect.fromCircle(center: Offset(cx, cy), radius: rInner))
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 1));
+    canvas.drawCircle(Offset(cx, cy), s.width * 0.045,
+      Paint()..color = Colors.white..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3));
+    canvas.drawCircle(Offset(cx, cy), s.width * 0.028, Paint()..color = Colors.white);
+  }
+  @override
+  bool shouldRepaint(_) => false;
+}
+
+class _OrbitPainter extends CustomPainter {
+  final double v;
+  _OrbitPainter(this.v);
+  double _c(double a) => 1 - a*a/2 + a*a*a*a/24;
+  double _s(double a) => a - a*a*a/6 + a*a*a*a*a/120;
+  @override
+  void paint(Canvas canvas, Size s) {
+    final cx = s.width/2, cy = s.height/2, r = s.width/2 - 4;
+    for (int i = 0; i < 12; i++) {
+      final a = (i / 12) * 6.28318;
+      canvas.drawCircle(Offset(cx + r*_c(a), cy + r*_s(a)), i%3==0 ? 2.2 : 1.2,
+        Paint()..color = kCyan.withOpacity(i%3==0 ? .45 : .18));
+    }
+    final ma = v * 6.28318;
+    canvas.drawCircle(Offset(cx + r*_c(ma), cy + r*_s(ma)), 4,
+      Paint()..color = kCyan..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4));
+  }
+  @override
+  bool shouldRepaint(_OrbitPainter o) => o.v != v;
+}
+
+// ROOT SHELL
 class RootShell extends StatefulWidget {
   const RootShell({super.key});
   @override
@@ -178,611 +441,57 @@ class RootShell extends StatefulWidget {
 
 class _RootShellState extends State<RootShell> {
   int _idx = 0;
-  final _pages = const [DashboardTab(), TweakTab(), ToolsTab(), AboutTab()];
+  final _pages = const [DashboardTab(), CommandTab(), ToolsTab(), AboutTab()];
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: kBg,
-      body: SafeArea(bottom: false, child: _pages[_idx]),
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: kPanel,
-          border: Border(top: BorderSide(color: kBorder, width: 1)),
-        ),
-        child: SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _navItem(0, Icons.dashboard_rounded, 'Dashboard'),
-                _navItem(1, Icons.tune_rounded, 'Tweak'),
-                _navItem(2, Icons.build_rounded, 'Tools'),
-                _navItem(3, Icons.info_rounded, 'Tentang'),
-              ],
-            ),
-          ),
+    return ValueListenableBuilder<bool>(
+      valueListenable: isNightNotifier,
+      builder: (_, __, ___) => Scaffold(
+        backgroundColor: kBg,
+        body: SafeArea(bottom: false, child: _pages[_idx]),
+        bottomNavigationBar: Container(
+          decoration: BoxDecoration(color: kPanel,
+            border: Border(top: BorderSide(color: kBorder, width: .5)),
+            boxShadow: [BoxShadow(color: Colors.black.withOpacity(.3), blurRadius: 20, offset: const Offset(0,-4))]),
+          child: SafeArea(top: false, child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+            child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
+              _nav(0, Icons.dashboard_rounded,    'Dashboard', kCyan),
+              _nav(1, Icons.account_tree_rounded, 'Command',   kPurple),
+              _nav(2, Icons.construction_rounded, 'Tools',     kOrange),
+              _nav(3, Icons.person_rounded,       'Tentang',   kGreen),
+            ]),
+          )),
         ),
       ),
     );
   }
 
-  Widget _navItem(int i, IconData icon, String label) {
+  Widget _nav(int i, IconData icon, String label, Color accent) {
     final on = _idx == i;
     return GestureDetector(
-      onTap: () => setState(() => _idx = i),
+      onTap: () { setState(() => _idx = i); HapticFeedback.selectionClick(); },
       behavior: HitTestBehavior.opaque,
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
+        duration: const Duration(milliseconds: 220), curve: Curves.easeOutCubic,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
-          color: on ? glow(kCyan, .12) : Colors.transparent,
+          color: on ? accent.withOpacity(.12) : Colors.transparent,
           borderRadius: BorderRadius.circular(14),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 22, color: on ? kCyan : mut(.4)),
-            const SizedBox(height: 4),
-            Text(label,
-                style: TextStyle(
-                    fontSize: 10.5,
-                    fontWeight: on ? FontWeight.w700 : FontWeight.w500,
-                    color: on ? kCyan : mut(.4))),
-          ],
-        ),
+          border: Border.all(color: on ? accent.withOpacity(.3) : Colors.transparent)),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 21, color: on ? accent : mut(.3)),
+          const SizedBox(height: 3),
+          Text(label, style: TextStyle(fontSize: 9.5, fontWeight: on ? FontWeight.w800 : FontWeight.w500,
+              color: on ? accent : mut(.3), letterSpacing: .3)),
+        ]),
       ),
     );
   }
 }
 
-// ============================================================
-// ROOT SERVICE
-// ============================================================
-class RootService {
-  static bool? _root;
-
-  static Future<bool> hasRoot() async {
-    if (_root != null) return _root!;
-    try {
-      final r = await Process.run('su', ['-c', 'id'])
-          .timeout(const Duration(seconds: 3));
-      _root = r.exitCode == 0;
-    } catch (_) {
-      _root = false;
-    }
-    return _root!;
-  }
-
-  static Future<String> run(String cmd) async {
-    try {
-      if (!await hasRoot()) return 'NO_ROOT';
-      final r = await Process.run('su', ['-c', cmd])
-          .timeout(const Duration(seconds: 6));
-      final out = r.stdout.toString().trim();
-      final err = r.stderr.toString().trim();
-      if (out.isEmpty && err.isNotEmpty) return 'NO_ROOT';
-      return out;
-    } catch (_) {
-      return 'NO_ROOT';
-    }
-  }
-
-  static bool bad(String v) => v == 'NO_ROOT' || v.trim().isEmpty;
-
-  static Future<List<int>> cores() async {
-    final r = await run(
-        'ls -d /sys/devices/system/cpu/cpu[0-9]* | sed "s#.*/cpu##"');
-    if (bad(r)) return [0];
-    final c = r
-        .split('\n')
-        .map((s) => int.tryParse(s.trim()))
-        .whereType<int>()
-        .toList();
-    return c.isEmpty ? [0] : c;
-  }
-
-  static Future<Map<String, String>> device() async {
-    try {
-      final man = await run('getprop ro.product.manufacturer');
-      final mod = await run('getprop ro.product.model');
-      final ver = await run('getprop ro.build.version.release');
-      final chip = await run('getprop ro.board.platform');
-      String name;
-      if (!bad(man) && !bad(mod)) {
-        name = mod.toLowerCase().contains(man.toLowerCase()) ? mod : '$man $mod';
-      } else if (!bad(mod)) {
-        name = mod;
-      } else {
-        name = 'Perangkat Android';
-      }
-      return {
-        'name': name,
-        'android': bad(ver) ? '-' : 'Android $ver',
-        'chipset': bad(chip) ? '-' : chip,
-      };
-    } catch (_) {
-      return {'name': 'Perangkat Android', 'android': '-', 'chipset': '-'};
-    }
-  }
-
-  // Refresh rate — kunci peak+min agar tidak adaptif (anti naik-turun)
-  // ===== REFRESH RATE (versi kuat, anti naik-turun) =====
-  // Kunci refresh rate dengan menulis ke SEMUA key yang dipakai vendor
-  // berbeda sekaligus. Agar benar-benar statis (tidak adaptif), peak=min=hz.
-  // Juga set SurfaceFlinger lewat service call sebagai penegasan di sebagian
-  // device yang mengabaikan settings provider.
-  static Future<String> setRefresh(int hz) => run('''
-    settings put system peak_refresh_rate $hz.0 2>/dev/null
-    settings put system min_refresh_rate $hz.0 2>/dev/null
-    settings put system user_refresh_rate $hz 2>/dev/null
-    settings put system miui_refresh_rate $hz 2>/dev/null
-    settings put system oplus_customize_refresh_rate $hz 2>/dev/null
-    settings put global oplus_force_screen_refresh_rate $hz 2>/dev/null
-    settings put secure refresh_rate_mode 1 2>/dev/null
-    echo OK''');
-
-  // Membaca refresh rate yang BENAR-BENAR aktif. Mencoba beberapa sumber
-  // berurutan karena format dumpsys beda tiap vendor; ambil yang pertama valid.
-  static Future<String> currentRefresh() async {
-    // 1) Sumber paling akurat: fps aktif dari SurfaceFlinger
-    final candidates = <String>[
-      // ambil angka "fps" yang muncul setelah label refresh/active mode
-      'dumpsys display | grep -iE "mActiveModeId|fps=" | grep -oE "fps=[0-9.]+" | head -1 | grep -oE "[0-9.]+"',
-      'dumpsys SurfaceFlinger | grep -iE "refresh.?rate" | grep -oE "[0-9]+\\.[0-9]+" | head -1',
-      'dumpsys display | grep -iE "renderFrameRate|refreshRate" | grep -oE "[0-9]+\\.[0-9]+" | head -1',
-    ];
-    for (final c in candidates) {
-      final r = await run(c);
-      if (!bad(r)) {
-        final p = double.tryParse(r.trim());
-        if (p != null && p >= 20 && p <= 240) return p.round().toString();
-      }
-    }
-    // 2) Fallback: nilai yang kita set sendiri
-    final peak = await run('settings get system peak_refresh_rate');
-    if (!bad(peak)) {
-      final p = double.tryParse(peak.trim());
-      if (p != null) return p.round().toString();
-    }
-    return 'NO_ROOT';
-  }
-
-  static Future<String> clearRam() => run('''
-    for pkg in \$(cmd package list packages -3 | cut -f2 -d:); do
-      am force-stop \$pkg 2>/dev/null
-    done
-    echo OK''');
-
-  // ===== UTILITAS TOOLS TAMBAHAN =====
-  // Flush DNS: bersihkan cache resolver agar koneksi memakai DNS terbaru.
-  static Future<String> flushDns() => run('''
-    ndc resolver flushdefaultif 2>/dev/null
-    ndc resolver flushnet 0 2>/dev/null
-    setprop net.dns.cache.flush 1 2>/dev/null
-    echo OK''');
-
-  // Refresh sinyal: toggle airplane mode cepat (off->on->off) supaya modem
-  // mencari ulang jaringan. Aman, memakai cmd connectivity / settings.
-  static Future<String> refreshSignal() => run('''
-    settings put global airplane_mode_on 1 2>/dev/null
-    am broadcast -a android.intent.action.AIRPLANE_MODE --ez state true 2>/dev/null
-    cmd connectivity airplane-mode enable 2>/dev/null
-    sleep 2
-    settings put global airplane_mode_on 0 2>/dev/null
-    am broadcast -a android.intent.action.AIRPLANE_MODE --ez state false 2>/dev/null
-    cmd connectivity airplane-mode disable 2>/dev/null
-    echo OK''');
-
-  // Bersihkan cache semua aplikasi (lega penyimpanan).
-  static Future<String> trimCaches() =>
-      run('pm trim-caches 999999999999 2>/dev/null; echo OK');
-
-  // Reset statistik baterai (kalibrasi penghitungan, bukan kapasitas fisik).
-  static Future<String> resetBatteryStats() =>
-      run('dumpsys batterystats --reset 2>/dev/null; echo OK');
-
-  static Future<Map<String, String>> ram() async {
-    try {
-      final t = await run(
-          "cat /proc/meminfo | grep MemTotal | awk '{print \$2}'");
-      final a = await run(
-          "cat /proc/meminfo | grep MemAvailable | awk '{print \$2}'");
-      final tMB = (int.tryParse(t) ?? 0) ~/ 1024;
-      final aMB = (int.tryParse(a) ?? 0) ~/ 1024;
-      if (tMB == 0) return {'total': '-', 'avail': '-', 'used': '-', 'pct': '0'};
-      final u = tMB - aMB;
-      return {
-        'total': '$tMB MB',
-        'avail': '$aMB MB',
-        'used': '$u MB',
-        'pct': '${((u / tMB) * 100).round()}',
-      };
-    } catch (_) {
-      return {'total': '-', 'avail': '-', 'used': '-', 'pct': '0'};
-    }
-  }
-
-  // ===== CPU GOVERNOR (versi kuat & maksimal) =====
-  // Perbaikan utama:
-  // 1. Tulis ke POLICY groups (/cpufreq/policy*) — ini sumber sebenarnya
-  //    pada HP modern (per-cluster), bukan cuma per-cpu individual.
-  // 2. Tetap tulis per-cpu sebagai cadangan untuk kernel lama.
-  // 3. Untuk "performance": kunci scaling_min_freq = scaling_max_freq supaya
-  //    benar-benar maksimal dan tidak turun (ini yang sebelumnya bikin
-  //    "belum maksimal"). Untuk governor lain, kembalikan min ke cpuinfo_min.
-  // 4. Semua tulisan diberi "2>/dev/null" + cek file ada, agar core/policy
-  //    yang offline atau tidak ada tidak memicu error.
-  static Future<String> setGov(String g) async {
-    final cs = await cores();
-    final perCpu = cs
-        .map((i) =>
-            '[ -f /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor ] && '
-            'echo $g > /sys/devices/system/cpu/cpu$i/cpufreq/scaling_governor 2>/dev/null')
-        .join('\n');
-
-    // Bagian frekuensi.
-    // PERBAIKAN PENTING (terbukti dari tes di device):
-    //  - scaling_max_freq HARUS ditulis SEBELUM scaling_min_freq. Kalau min
-    //    ditulis lebih dulu ke nilai > max yang berlaku, kernel menolak →
-    //    inilah yang dulu bikin clock mentok (min/max gagal naik).
-    //  - Governor di-set lebih dulu, baru frekuensi.
-    //  - Path MediaTek /proc/ppm & /proc/cpufreq tidak ada di device ini,
-    //    jadi dihapus total (sebelumnya cuma sia-sia).
-    String freqPart;
-    if (g == 'performance') {
-      freqPart = '''
-        for P in /sys/devices/system/cpu/cpufreq/policy*; do
-          [ -d "\$P" ] || continue
-          echo performance > "\$P/scaling_governor" 2>/dev/null
-          MAXF=\$(cat "\$P/cpuinfo_max_freq" 2>/dev/null)
-          if [ -n "\$MAXF" ]; then
-            # Urutan benar: naikkan max DULU, baru kunci min = max.
-            echo "\$MAXF" > "\$P/scaling_max_freq" 2>/dev/null
-            echo "\$MAXF" > "\$P/scaling_min_freq" 2>/dev/null
-          fi
-        done''';
-    } else {
-      freqPart = '''
-        for P in /sys/devices/system/cpu/cpufreq/policy*; do
-          [ -d "\$P" ] || continue
-          echo $g > "\$P/scaling_governor" 2>/dev/null
-          MINF=\$(cat "\$P/cpuinfo_min_freq" 2>/dev/null)
-          MAXF=\$(cat "\$P/cpuinfo_max_freq" 2>/dev/null)
-          # Urutan benar: turunkan min DULU, baru buka max ke batas penuh.
-          [ -n "\$MINF" ] && echo "\$MINF" > "\$P/scaling_min_freq" 2>/dev/null
-          [ -n "\$MAXF" ] && echo "\$MAXF" > "\$P/scaling_max_freq" 2>/dev/null
-        done''';
-    }
-
-    return run('''
-$freqPart
-$perCpu
-# Verifikasi: cek prime cluster (policy7) benar-benar naik ke max-nya.
-PRIME=/sys/devices/system/cpu/cpufreq/policy7
-if [ -d "\$PRIME" ]; then
-  CURMAX=\$(cat "\$PRIME/scaling_max_freq" 2>/dev/null)
-  HWMAX=\$(cat "\$PRIME/cpuinfo_max_freq" 2>/dev/null)
-  GOVNOW=\$(cat "\$PRIME/scaling_governor" 2>/dev/null)
-else
-  CURMAX=\$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null)
-  HWMAX=\$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null)
-  GOVNOW=\$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
-fi
-if [ "\$GOVNOW" = "$g" ]; then
-  if [ "$g" = "performance" ] && [ "\$CURMAX" != "\$HWMAX" ]; then
-    echo "PARTIAL:\$CURMAX/\$HWMAX"
-  else
-    echo OK
-  fi
-else
-  echo "FAIL:\$GOVNOW"
-fi
-''');
-  }
-
-  static Future<String> gov() =>
-      run('cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor');
-
-  // Baca clock TERTINGGI dari semua core (bukan cuma cpu0 yang cluster little
-  // 2GHz). Ini yang sebelumnya bikin tampilan mentok di 2000 MHz.
-  static Future<String> freq() => run('''
-    MAX=0
-    for C in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do
-      [ -f "\$C" ] || continue
-      F=\$(cat "\$C" 2>/dev/null)
-      [ -n "\$F" ] && [ "\$F" -gt "\$MAX" ] && MAX=\$F
-    done
-    if [ "\$MAX" -gt 0 ]; then
-      awk "BEGIN{printf \\"%.0f MHz\\", \$MAX/1000}"
-    else
-      echo NO_ROOT
-    fi
-  ''');
-
-  // Frekuensi maksimum tertinggi yang didukung perangkat (untuk info).
-  static Future<String> maxFreq() => run('''
-    MAX=0
-    for C in /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq; do
-      [ -f "\$C" ] || continue
-      F=\$(cat "\$C" 2>/dev/null)
-      [ -n "\$F" ] && [ "\$F" -gt "\$MAX" ] && MAX=\$F
-    done
-    if [ "\$MAX" -gt 0 ]; then
-      awk "BEGIN{printf \\"%.0f MHz\\", \$MAX/1000}"
-    else
-      echo NO_ROOT
-    fi
-  ''');
-
-  static Future<String> lockBand() => run('''
-    echo "524288" > /data/local/tmp/bandlock.conf
-    echo "AT+EPBSE=524288" > /dev/ttyC0 2>/dev/null
-    echo OK''');
-  static Future<String> unlockBand() => run('''
-    echo "0" > /data/local/tmp/bandlock.conf
-    echo "AT+EPBSE=0" > /dev/ttyC0 2>/dev/null
-    echo OK''');
-  static Future<String> bandStatus() =>
-      run('cat /data/local/tmp/bandlock.conf 2>/dev/null || echo "0"');
-
-  static Future<String> thermalEsports() =>
-      run('setprop persist.thermal.config esports && echo OK');
-  static Future<String> thermalNormal() =>
-      run('setprop persist.thermal.config default && echo OK');
-  static Future<String> thermal() => run('getprop persist.thermal.config');
-
-  // ===== MATIKAN LAYAR =====
-  // Mengirim event tombol power (keycode 26) lewat input subsistem.
-  // Setara menekan tombol power fisik sekali — layar langsung mati.
-  static Future<String> screenOff() =>
-      run('input keyevent 26 && echo OK');
-
-  // ===== DOUBLE TAP TO WAKE =====
-  // Khusus Infinix/Tecno (Transsion OS): key yang BENAR & AMAN adalah
-  // `os_action_tapping_wake` di tabel SYSTEM. Ini terbukti dari pemeriksaan
-  // langsung di device — saat fitur diaktifkan dari menu Pengaturan bawaan,
-  // hanya key inilah yang berubah jadi 1.
-  //
-  // PENTING: kita TIDAK menulis ke node sysfs touchscreen (Goodix) lagi.
-  // Pada device ini, menulis ke node power/wakeup touchscreen MEMICU REBOOT.
-  // Menulis via settings provider jauh lebih aman dan itulah jalur resmi
-  // yang dibaca framework Transsion untuk mengaktifkan gesture wake.
-  //
-  // Masalah "sering ke-disable sendiri" diatasi dengan menulis ke beberapa
-  // key terkait sekaligus + key AOSP sebagai cadangan, lalu app bisa
-  // memanggil reapply() bila perlu.
-  static Future<String> enableDoubleTapWake() => run('''
-    settings put system os_action_tapping_wake 1 2>/dev/null
-    settings put system double_tap_to_wake 1 2>/dev/null
-    settings put secure double_tap_to_wake 1 2>/dev/null
-    settings put secure gesture_double_tap_to_wake 1 2>/dev/null
-    settings put global welcome_sahrul_dtw_pref 1 2>/dev/null
-    RESULT=\$(settings get system os_action_tapping_wake 2>/dev/null)
-    if [ "\$RESULT" = "1" ]; then echo OK; else echo "FAIL:\$RESULT"; fi''');
-
-  static Future<String> disableDoubleTapWake() => run('''
-    settings put system os_action_tapping_wake 0 2>/dev/null
-    settings put system double_tap_to_wake 0 2>/dev/null
-    settings put secure double_tap_to_wake 0 2>/dev/null
-    settings put secure gesture_double_tap_to_wake 0 2>/dev/null
-    settings put global welcome_sahrul_dtw_pref 0 2>/dev/null
-    echo OK''');
-
-  // Status dibaca dari key Transsion yang benar.
-  static Future<String> doubleTapWakeStatus() async {
-    final r = await run('settings get system os_action_tapping_wake');
-    if (!bad(r) && r.trim() == '1') return '1';
-    return '0';
-  }
-
-  // AUTO RE-APPLY:
-  // Masalah "ke-disable sendiri setelah hemat daya + reboot" terjadi karena
-  // sistem/penghemat baterai me-reset os_action_tapping_wake ke 0 saat boot.
-  // App menyimpan PREFERENSI user di key `welcome_sahrul_dtw_pref` (key custom
-  // milik app, tidak diutak-atik sistem). Saat app dibuka, kalau preferensi
-  // user = 1 TAPI setting aktual sudah ke-reset jadi 0, app menulis ulang
-  // otomatis — jadi user tidak perlu mengaktifkan manual tiap habis reboot.
-  static Future<void> reapplyDoubleTapWakeIfNeeded() async {
-    try {
-      final pref = await run('settings get global welcome_sahrul_dtw_pref');
-      if (bad(pref) || pref.trim() != '1') return; // user belum pernah aktifkan
-      final actual = await run('settings get system os_action_tapping_wake');
-      if (actual.trim() != '1') {
-        // ke-reset oleh sistem — pulihkan
-        await run(
-            'settings put system os_action_tapping_wake 1 2>/dev/null; echo OK');
-      }
-    } catch (_) {
-      // diam saja; ini best-effort, tidak boleh bikin app gagal start
-    }
-  }
-
-  // Key Transsion ini SELALU tersedia di Infinix/Tecno, jadi fitur dianggap
-  // didukung. (Tidak lagi bergantung pada node sysfs yang berisiko.)
-  static Future<bool> doubleTapWakeNodeExists() async {
-    final r = await run('settings get system os_action_tapping_wake');
-    // Walau nilainya "null"/0, key-nya tetap bisa di-set; anggap didukung
-    // selama shell bisa membaca settings (root aktif).
-    return !bad(r);
-  }
-
-  // ===== DISABLE THERMAL TOTAL =====
-  // Mematikan semua thermal throttling: thermal-engine service (MediaTek/QCOM),
-  // mtk_thermal, dan node thermal_zone mode. Disimpan flag agar UI tahu status.
-  // PERINGATAN: menghilangkan proteksi panas — dipakai dengan risiko sendiri.
-  static Future<String> disableThermal() => run('''
-    # Hentikan service thermal-engine (nama beda tiap vendor)
-    stop thermal-engine 2>/dev/null
-    stop vendor.thermal-engine 2>/dev/null
-    stop mtk_thermal 2>/dev/null
-    setprop persist.vendor.disable.thermal.control 1 2>/dev/null
-    setprop persist.thermal.config disabled 2>/dev/null
-    # Set semua thermal_zone ke mode disabled
-    for Z in /sys/class/thermal/thermal_zone*; do
-      [ -f "\$Z/mode" ] && echo disabled > "\$Z/mode" 2>/dev/null
-    done
-    # MediaTek: matikan thermal policy
-    echo 0 > /proc/mtk_thermal/mtktscpu/mtktscpu_dump 2>/dev/null
-    echo 0 > /sys/kernel/thermal/mode 2>/dev/null
-    echo OK''');
-
-  static Future<String> enableThermal() => run('''
-    # Aktifkan kembali proteksi thermal
-    start thermal-engine 2>/dev/null
-    start vendor.thermal-engine 2>/dev/null
-    start mtk_thermal 2>/dev/null
-    setprop persist.vendor.disable.thermal.control 0 2>/dev/null
-    setprop persist.thermal.config default 2>/dev/null
-    for Z in /sys/class/thermal/thermal_zone*; do
-      [ -f "\$Z/mode" ] && echo enabled > "\$Z/mode" 2>/dev/null
-    done
-    echo 1 > /sys/kernel/thermal/mode 2>/dev/null
-    echo OK''');
-
-  static Future<String> thermalDisabledStatus() =>
-      run('getprop persist.vendor.disable.thermal.control');
-
-  static Future<String> rebootSystem() => run('reboot');
-  static Future<String> rebootRecovery() => run('reboot recovery');
-  static Future<String> rebootFastboot() => run('reboot bootloader');
-
-  static Future<String> battery() async {
-    final r = await run('cat /sys/class/power_supply/battery/capacity');
-    if (!bad(r)) return r;
-    return run('cat /sys/class/power_supply/bms/capacity');
-  }
-
-  static Future<String> temp() async {
-    for (var i = 0; i < 6; i++) {
-      final type =
-          await run('cat /sys/class/thermal/thermal_zone$i/type 2>/dev/null');
-      if (type.toLowerCase().contains('cpu') ||
-          type.toLowerCase().contains('tsens')) {
-        final t = await run(
-            "cat /sys/class/thermal/thermal_zone$i/temp | awk '{printf \"%.1f\", \$1/1000}'");
-        if (!bad(t)) {
-          final v = double.tryParse(t) ?? 0;
-          final f = v > 200 ? v / 1000 : v;
-          return '${f.toStringAsFixed(1)}°C';
-        }
-      }
-    }
-    final t = await run(
-        "cat /sys/class/thermal/thermal_zone0/temp | awk '{printf \"%.1f\", \$1/1000}'");
-    if (bad(t)) return 'NO_ROOT';
-    final v = double.tryParse(t) ?? 0;
-    final f = v > 200 ? v / 1000 : v;
-    return '${f.toStringAsFixed(1)}°C';
-  }
-
-  static Future<Map<String, String>> sysInfo() async {
-    try {
-      if (!await hasRoot()) {
-        return {'root': 'false'};
-      }
-      final b = await battery();
-      final tp = await temp();
-      final fq = await freq();
-      final mfq = await maxFreq();
-      final gv = await gov();
-      final rr = await currentRefresh();
-      final th = await thermal();
-      final tdis = await thermalDisabledStatus();
-      final bn = await bandStatus();
-      return {
-        'battery': bad(b) ? '-' : '$b%',
-        'temp': bad(tp) ? '-' : tp,
-        'freq': bad(fq) ? '-' : fq,
-        'max_freq': bad(mfq) ? '-' : mfq,
-        'gov': bad(gv) ? '-' : gv,
-        'refresh': bad(rr) ? '-' : '${rr}Hz',
-        'thermal': bad(th) ? 'default' : th,
-        'thermal_disabled': tdis.trim() == '1' ? 'true' : 'false',
-        'band': bn == '524288' ? 'B1+B3+B8' : 'Auto',
-        'root': 'true',
-      };
-    } catch (_) {
-      return {'root': 'false'};
-    }
-  }
-}
-
-// ============================================================
-// SHARED STATE (sederhana, via ValueNotifier global)
-// ============================================================
-final sysNotifier = ValueNotifier<Map<String, String>>({});
-final ramNotifier = ValueNotifier<Map<String, String>>({});
-final deviceNotifier =
-    ValueNotifier<Map<String, String>>({'name': 'Memuat...', 'android': '-'});
-final busyNotifier = ValueNotifier<bool>(false);
-final toastNotifier = ValueNotifier<String>('');
-
-Timer? _pollTimer;
-void startPolling() {
-  _refreshAll();
-  _pollTimer ??=
-      Timer.periodic(const Duration(seconds: 5), (_) => _refreshAll());
-}
-
-Future<void> _refreshAll() async {
-  try {
-    sysNotifier.value = await RootService.sysInfo();
-    ramNotifier.value = await RootService.ram();
-  } catch (_) {}
-}
-
-Future<void> loadDevice() async {
-  try {
-    deviceNotifier.value = await RootService.device();
-  } catch (_) {}
-}
-
-void showToast(String msg) {
-  toastNotifier.value = msg;
-  Timer(const Duration(seconds: 3), () {
-    if (toastNotifier.value == msg) toastNotifier.value = '';
-  });
-}
-
-Future<void> runAction(Future<String> Function() action,
-    {required String ok, String? noRoot}) async {
-  if (busyNotifier.value) return;
-  busyNotifier.value = true;
-  try {
-    final r = await action().timeout(const Duration(seconds: 9));
-    if (RootService.bad(r)) {
-      showToast('⚠️ ${noRoot ?? 'Fitur ini butuh akses root aktif.'}');
-    } else if (r.startsWith('FAIL:')) {
-      // Governor ditolak kernel — tampilkan nilai aktual yang berlaku.
-      final actual = r.substring(5).trim();
-      showToast(actual.isEmpty
-          ? '⚠️ Mode tidak didukung kernel device ini.'
-          : '⚠️ Ditolak kernel. Aktif sekarang: "$actual"');
-    } else if (r.startsWith('PARTIAL:')) {
-      // Governor performance aktif, tapi max belum 100% (kemungkinan thermal
-      // throttle menahan). Tampilkan progres jujur dalam MHz.
-      final parts = r.substring(8).trim().split('/');
-      final cur = (int.tryParse(parts.isNotEmpty ? parts[0] : '0') ?? 0) ~/ 1000;
-      final hw = (int.tryParse(parts.length > 1 ? parts[1] : '0') ?? 0) ~/ 1000;
-      showToast('⚡ Performa aktif: $cur MHz (batas $hw MHz). '
-          'Thermal menahan — matikan thermal untuk penuh.');
-    } else {
-      showToast(ok);
-    }
-    await _refreshAll();
-  } catch (_) {
-    showToast('⚠️ Gagal menjalankan aksi. Coba lagi.');
-  } finally {
-    busyNotifier.value = false;
-  }
-}
-
-// ============================================================
-// DASHBOARD TAB
-// ============================================================
+// DASHBOARD
 class DashboardTab extends StatefulWidget {
   const DashboardTab({super.key});
   @override
@@ -790,860 +499,617 @@ class DashboardTab extends StatefulWidget {
 }
 
 class _DashboardTabState extends State<DashboardTab> {
+  String _freq = '---', _gov = '---', _temp = '---';
+  String _memTotal = '---', _memFree = '---';
+  String _bat = '---', _batTemp = '---', _uptime = '---';
+  bool _loading = true;
+  late Timer _timer;
+
   @override
-  void initState() {
-    super.initState();
-    loadDevice();
-    startPolling();
-    // Pulihkan otomatis "Ketuk 2x untuk Bangun" jika sebelumnya diaktifkan
-    // user tapi ke-reset sistem (mis. setelah hemat daya + reboot).
-    RootService.reapplyDoubleTapWakeIfNeeded();
+  void initState() { super.initState(); _fetch(); _timer = Timer.periodic(const Duration(seconds: 3), (_) => _fetch()); }
+
+  @override
+  void dispose() { _timer.cancel(); super.dispose(); }
+
+  Future<String> _r(String p) async => readSys(p);
+  Future<String> _rf(String p) async => readSys(p);
+  int _parseMem(String c, String k) {
+    for (final l in c.split('\n')) {
+      if (l.startsWith(k)) return int.tryParse(l.split(':')[1].trim().split(' ')[0]) ?? 0;
+    }
+    return 0;
+  }
+
+  Future<void> _fetch() async {
+    try {
+      final freq = await _r('/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq');
+      final gov  = await _r('/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor');
+      String temp = '---';
+      for (int i = 0; i < 15; i++) {
+        final t = await _r('/sys/class/thermal/thermal_zone$i/temp');
+        final n = int.tryParse(t) ?? 0;
+        if (n > 25000 && n < 95000) { temp = '${(n/1000).toStringAsFixed(1)}°C'; break; }
+      }
+      final mem = await _rf('/proc/meminfo');
+      final mt = _parseMem(mem, 'MemTotal'), mf = _parseMem(mem, 'MemAvailable');
+      String bat = '', bt = '---';
+      bat = await _r('/sys/class/power_supply/battery/capacity');
+      String rawBt = await _r('/sys/class/power_supply/battery/temp');
+      if (rawBt.isEmpty) rawBt = await _r('/sys/class/power_supply/mtk-gauge/temp');
+      final bti = int.tryParse(rawBt) ?? 0;
+      if (bti != 0) bt = bti > 100 ? '${(bti/10).toStringAsFixed(1)}°C' : '$bti°C';
+      if (bat.isNotEmpty) bat = '$bat%';
+      final up = await _rf('/proc/uptime');
+      final sec = double.tryParse(up.split(' ')[0]) ?? 0;
+      final upStr = '${sec~/3600}h ${((sec%3600)~/60)}m';
+      final freqMhz = int.tryParse(freq) ?? 0;
+      if (mounted) setState(() {
+        _freq = freqMhz > 0 ? '${(freqMhz/1000).round()} MHz' : '---';
+        _gov = gov.isEmpty ? '---' : gov;
+        _temp = temp;
+        _memTotal = mt > 0 ? '${(mt/1024).round()} MB' : '---';
+        _memFree  = mf > 0 ? '${(mf/1024).round()} MB' : '---';
+        _bat = bat.isEmpty ? '---' : bat;
+        _batTemp = bt;
+        _uptime = upStr;
+        _loading = false;
+      });
+    } catch (_) { if (mounted) setState(() => _loading = false); }
   }
 
   @override
   Widget build(BuildContext context) {
-    return RefreshIndicator(
-      onRefresh: _refreshAll,
-      color: kCyan,
-      backgroundColor: kPanel,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-        children: [
-          _header(),
-          ValueListenableBuilder<String>(
-            valueListenable: toastNotifier,
-            builder: (_, msg, __) => msg.isEmpty
-                ? const SizedBox.shrink()
-                : Padding(
-                    padding: const EdgeInsets.only(top: 14),
-                    child: _banner(msg)),
-          ),
-          ValueListenableBuilder<Map<String, String>>(
-            valueListenable: sysNotifier,
-            builder: (_, sys, __) {
-              if (sys['root'] == 'false') {
-                return Padding(
-                  padding: const EdgeInsets.only(top: 14),
-                  child: _banner(
-                      '⚠️ Akses root belum aktif. Berikan izin root lalu tarik untuk refresh.',
-                      color: kYellow),
-                );
-              }
-              return const SizedBox.shrink();
-            },
-          ),
-          const SizedBox(height: 24),
-          _sectionTitle('STATUS REAL-TIME', kCyan),
-          const SizedBox(height: 12),
-          _infoGrid(),
-          const SizedBox(height: 24),
-          _sectionTitle('AKSI CEPAT', kGreen),
-          const SizedBox(height: 12),
-          _quickActions(),
-          const SizedBox(height: 24),
-          _sectionTitle('LAYAR & GESTURE', kTeal),
-          const SizedBox(height: 12),
-          _controlCard(
-            Icons.power_settings_new_rounded,
-            'Matikan Layar',
-            'Sama seperti menekan tombol power',
-            'Matikan',
-            kTeal,
-            () => runAction(RootService.screenOff, ok: '✅ Layar dimatikan'),
-          ),
-          const SizedBox(height: 10),
-          const _DoubleTapWakeTile(),
-        ],
-      ),
-    );
-  }
-
-  Widget _header() {
-    return Container(
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-            colors: [kPanel, kPanel2],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: glow(kCyan, .15)),
-      ),
-      child: Row(children: [
-        Container(
-          width: 48,
-          height: 48,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            gradient: const LinearGradient(colors: [kCyan, Color(0xFF0090A8)]),
-            boxShadow: [
-              BoxShadow(color: glow(kCyan, .35), blurRadius: 14, spreadRadius: -2)
-            ],
-          ),
-          child: const Icon(Icons.bolt_rounded, color: Colors.black, size: 24),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: ValueListenableBuilder<Map<String, String>>(
-            valueListenable: deviceNotifier,
-            builder: (_, d, __) => Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Welcome Sahrul',
-                    style: TextStyle(
-                        fontSize: 19,
-                        fontWeight: FontWeight.w800,
-                        color: kWhite,
-                        letterSpacing: -.3)),
-                const SizedBox(height: 2),
-                Text('${d['name']} • ${d['android']}',
-                    style: TextStyle(fontSize: 11.5, color: mut(.45)),
-                    overflow: TextOverflow.ellipsis),
-              ],
+    return ValueListenableBuilder<bool>(
+      valueListenable: isNightNotifier,
+      builder: (_, __, ___) => RefreshIndicator(
+        onRefresh: _fetch, color: kCyan,
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(18),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            _pageHeader('Dashboard', 'Live System Monitor', kCyan),
+            const SizedBox(height: 16),
+            ValueListenableBuilder<bool>(
+              valueListenable: isRootNotifier,
+              builder: (_, root, __) => _banner(root),
             ),
-          ),
-        ),
-        themeToggleButton(),
-        const SizedBox(width: 8),
-        ValueListenableBuilder<bool>(
-          valueListenable: busyNotifier,
-          builder: (_, busy, __) => busy
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                      strokeWidth: 2, color: kCyan))
-              : GestureDetector(
-                  onTap: _refreshAll,
-                  child: Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                        color: mut(.05),
-                        borderRadius: BorderRadius.circular(12)),
-                    child: const Icon(Icons.refresh_rounded,
-                        color: kCyan, size: 20),
-                  ),
-                ),
-        ),
-      ]),
-    );
-  }
-
-  Widget _infoGrid() {
-    return ValueListenableBuilder<Map<String, String>>(
-      valueListenable: sysNotifier,
-      builder: (_, sys, __) {
-        return ValueListenableBuilder<Map<String, String>>(
-          valueListenable: ramNotifier,
-          builder: (_, ram, __) {
-            final batV =
-                double.tryParse((sys['battery'] ?? '').replaceAll('%', '')) ?? 0;
-            final tmpV =
-                double.tryParse((sys['temp'] ?? '').replaceAll('°C', '')) ?? 0;
-            final ramP = (int.tryParse(ram['pct'] ?? '0') ?? 0) / 100;
-            return GridView.count(
-              shrinkWrap: true,
+            const SizedBox(height: 18),
+            _sectionLabel('PROCESSOR', kCyan),
+            const SizedBox(height: 10),
+            _loading ? _skel() : GridView.count(
+              crossAxisCount: 2, shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              crossAxisCount: 2,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 10,
-              childAspectRatio: 1.25,
+              crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.15,
               children: [
-                _ring(Icons.battery_charging_full_rounded, 'BATERAI',
-                    sys['battery'] ?? '-', kGreen,
-                    pct: sys['battery'] != null ? batV / 100 : null),
-                _ring(Icons.thermostat_rounded, 'SUHU CPU', sys['temp'] ?? '-',
-                    kOrange,
-                    pct: sys['temp'] != null ? (tmpV / 90).clamp(0, 1) : null),
-                _ring(Icons.memory_rounded, 'RAM TERPAKAI', ram['used'] ?? '-',
-                    kYellow,
-                    pct: ram['used'] != null ? ramP : null),
-                _ring(Icons.speed_rounded, 'CPU FREQ', sys['freq'] ?? '-', kCyan),
-                _ring(Icons.monitor_rounded, 'REFRESH', sys['refresh'] ?? '-',
-                    kPurple),
-                _ring(Icons.signal_cellular_alt_rounded, 'LTE BAND',
-                    sys['band'] ?? '-', kTeal),
+                _tile('CPU Freq', _freq, Icons.speed_rounded, kCyan),
+                _tile('Governor', _gov, Icons.tune_rounded, kPurple),
+                _tile('CPU Temp', _temp, Icons.thermostat_rounded,
+                    _temp == '---' ? kBlue : (double.tryParse(_temp.replaceAll('°C',''))??0) > 55 ? kRed : kGreen),
+                _tile('Uptime', _uptime, Icons.timer_rounded, kTeal),
               ],
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Widget _quickActions() {
-    return Row(children: [
-      Expanded(
-        child: _quickBtn(Icons.cleaning_services_rounded, 'Bersihkan RAM',
-            kOrange, () {
-          runAction(RootService.clearRam, ok: '✅ RAM dibersihkan!');
-        }),
-      ),
-      const SizedBox(width: 10),
-      Expanded(
-        child: _quickBtn(Icons.rocket_launch_rounded, 'Mode Performa', kYellow,
-            () {
-          runAction(() => RootService.setGov('performance'),
-              ok: '✅ CPU mode Performa aktif!');
-        }),
-      ),
-    ]);
-  }
-
-  Widget _quickBtn(IconData ic, String label, Color c, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 18),
-        decoration: BoxDecoration(
-          color: kPanel,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: glow(c, .25)),
-        ),
-        child: Column(children: [
-          Icon(ic, color: c, size: 26),
-          const SizedBox(height: 8),
-          Text(label,
-              style: TextStyle(
-                  color: kWhite, fontSize: 12.5, fontWeight: FontWeight.w600)),
-        ]),
-      ),
-    );
-  }
-}
-
-// ============================================================
-// TWEAK TAB
-// ============================================================
-class TweakTab extends StatefulWidget {
-  const TweakTab({super.key});
-  @override
-  State<TweakTab> createState() => _TweakTabState();
-}
-
-class _TweakTabState extends State<TweakTab> {
-  int _hz = 60;
-  String _gov = 'schedutil';
-  DateTime _lastUserPick = DateTime.fromMillisecondsSinceEpoch(0);
-
-  // Sinkronkan tampilan dengan kondisi NYATA sistem, tapi jangan timpa
-  // pilihan user dalam 6 detik setelah ia menekan tombol (biar tidak
-  // "lompat" saat command masih diterapkan).
-  void _syncFromSystem(Map<String, String> sys) {
-    final since = DateTime.now().difference(_lastUserPick).inSeconds;
-    if (since < 6) return;
-    final realGov = sys['gov'];
-    if (realGov != null && realGov != '-' && realGov != _gov) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() => _gov = realGov);
-      });
-    }
-    final realRr =
-        int.tryParse((sys['refresh'] ?? '').replaceAll('Hz', '').trim());
-    if (realRr != null && realRr != _hz && [40, 60, 90, 120, 144].contains(realRr)) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() => _hz = realRr);
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<Map<String, String>>(
-      valueListenable: sysNotifier,
-      builder: (_, sys, __) {
-        _syncFromSystem(sys);
-        final bandLocked = sys['band'] != null && sys['band'] != 'Auto';
-        final esports = sys['thermal'] == 'esports';
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-          children: [
-            pageTitleRow(
-                'Tweak Performa', 'Atur perilaku perangkat sesuai kebutuhanmu'),
-            const SizedBox(height: 24),
-
-            _sectionTitle('REFRESH RATE', kPurple),
-            const SizedBox(height: 12),
-            _refreshCard(sys),
-            const SizedBox(height: 22),
-
-            _sectionTitle('CPU GOVERNOR', kYellow),
-            const SizedBox(height: 12),
-            _govCard(sys),
-            const SizedBox(height: 22),
-
-            _sectionTitle('LTE BAND LOCK', kTeal),
-            const SizedBox(height: 12),
-            _controlCard(
-              Icons.cell_tower_rounded,
-              'Lock Band Tri Indonesia',
-              bandLocked ? 'Terkunci: B1 + B3 + B8' : 'Mode: Auto (semua band)',
-              bandLocked ? 'Lepas' : 'Lock',
-              bandLocked ? kTeal : kPurple,
-              () => runAction(
-                bandLocked ? RootService.unlockBand : RootService.lockBand,
-                ok: bandLocked ? '✅ Band kembali Auto' : '✅ Band dikunci Tri',
-                noRoot: 'Lock band butuh dukungan modem khusus & root.',
-              ),
             ),
-            const SizedBox(height: 22),
-
-            _sectionTitle('MODE THERMAL', kOrange),
-            const SizedBox(height: 12),
-            _controlCard(
-              Icons.sports_esports_rounded,
-              'Mode Esports (Gaming)',
-              esports ? 'Aktif: thermal dibuka' : 'Aktif: Normal',
-              esports ? 'Normal' : 'Aktifkan',
-              esports ? kGreen : kOrange,
-              () => runAction(
-                esports
-                    ? RootService.thermalNormal
-                    : RootService.thermalEsports,
-                ok: esports ? '✅ Thermal Normal' : '✅ Mode Esports aktif!',
-                noRoot: 'Thermal profile ini tak didukung ROM kamu.',
-              ),
-            ),
-            const SizedBox(height: 12),
-            _buildDisableThermalCard(context, sys),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _buildDisableThermalCard(
-      BuildContext context, Map<String, String> sys) {
-    final off = sys['thermal_disabled'] == 'true';
-    final tempStr = (sys['temp'] ?? '').replaceAll('°C', '');
-    final tempVal = double.tryParse(tempStr) ?? 0;
-    final hot = tempVal >= 48;
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: kPanel,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-            color: off ? kRed : kBorder, width: off ? 1.5 : 1),
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Container(
-            padding: const EdgeInsets.all(11),
-            decoration: BoxDecoration(
-                color: glow(kRed, .1),
-                borderRadius: BorderRadius.circular(13)),
-            child: const Icon(Icons.local_fire_department_rounded,
-                color: kRed, size: 22),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Disable Thermal (Total)',
-                      style: TextStyle(
-                          color: kWhite,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 3),
-                  Text(
-                      off
-                          ? '🔴 Proteksi panas DIMATIKAN'
-                          : 'Lepas semua batas suhu (berisiko)',
-                      style: TextStyle(
-                          color: off ? kRed : mut(.45), fontSize: 11.5)),
-                ]),
-          ),
-          const SizedBox(width: 10),
-          ElevatedButton(
-            onPressed: () {
-              if (off) {
-                runAction(RootService.enableThermal,
-                    ok: '✅ Proteksi thermal diaktifkan kembali');
-              } else {
-                _confirmDisableThermal(context);
-              }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: off ? glow(kGreen, .15) : glow(kRed, .15),
-              foregroundColor: off ? kGreen : kRed,
-              side: BorderSide(color: off ? kGreen : kRed),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(11)),
-              elevation: 0,
-            ),
-            child: Text(off ? 'Aktifkan' : 'Matikan',
-                style: const TextStyle(
-                    fontSize: 11.5, fontWeight: FontWeight.bold)),
-          ),
-        ]),
-        if (off && hot) ...[
-          const SizedBox(height: 12),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(11),
-            decoration: BoxDecoration(
-              color: glow(kRed, .12),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: glow(kRed, .5)),
-            ),
-            child: Row(children: [
-              const Icon(Icons.warning_amber_rounded, color: kRed, size: 16),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                    'Suhu ${sys['temp']} — sudah panas! Sebaiknya aktifkan kembali thermal.',
-                    style: const TextStyle(
-                        color: kRed, fontSize: 11.5, height: 1.3)),
-              ),
+            const SizedBox(height: 18),
+            _sectionLabel('MEMORY', kPurple),
+            const SizedBox(height: 10),
+            _loading ? _skel() : _memCard(),
+            const SizedBox(height: 18),
+            _sectionLabel('BATTERY', kGreen),
+            const SizedBox(height: 10),
+            _loading ? _skel() : Row(children: [
+              Expanded(child: _tile('Kapasitas', _bat, Icons.battery_full_rounded, kGreen)),
+              const SizedBox(width: 10),
+              Expanded(child: _tile('Suhu', _batTemp, Icons.device_thermostat_rounded, kOrange)),
             ]),
-          ),
-        ],
-      ]),
-    );
-  }
-
-  void _confirmDisableThermal(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: kPanel,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(children: [
-          const Icon(Icons.warning_amber_rounded, color: kRed, size: 22),
-          const SizedBox(width: 8),
-          Text('Peringatan', style: TextStyle(color: kWhite, fontSize: 17)),
-        ]),
-        content: Text(
-          'Mematikan thermal akan menghilangkan SEMUA proteksi panas perangkat.\n\n'
-          'Risiko: HP cepat panas, baterai bisa rusak/menggembung, dan komponen '
-          'bisa rusak permanen jika dibiarkan terlalu lama.\n\n'
-          'Gunakan hanya sebentar saat gaming, dan aktifkan kembali setelahnya. '
-          'Lanjutkan?',
-          style: TextStyle(color: mut(.7), fontSize: 13, height: 1.4),
+            const SizedBox(height: 20),
+          ]),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Batal'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-                backgroundColor: kRed, foregroundColor: Colors.white),
-            onPressed: () {
-              Navigator.pop(ctx);
-              runAction(RootService.disableThermal,
-                  ok: '🔴 Thermal dimatikan — pantau suhu!',
-                  noRoot: 'Tidak bisa mematikan thermal di ROM ini.');
-            },
-            child: const Text('Ya, Matikan'),
-          ),
-        ],
       ),
     );
   }
 
-  Widget _refreshCard(Map<String, String> sys) {
+  Widget _banner(bool root) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+    decoration: BoxDecoration(
+      color: root ? kGreen.withOpacity(.07) : kYellow.withOpacity(.07),
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: root ? kGreen.withOpacity(.25) : kYellow.withOpacity(.25))),
+    child: Row(children: [
+      Icon(root ? Icons.verified_rounded : Icons.info_rounded,
+          color: root ? kGreen : kYellow, size: 20),
+      const SizedBox(width: 12),
+      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(root ? 'Root Aktif — MT6895' : 'Mode Non-Root',
+            style: TextStyle(color: kWhite, fontSize: 13, fontWeight: FontWeight.w700)),
+        Text(root ? 'KernelSU · Semua fitur tersedia' : 'Mode aman — fitur terbatas',
+            style: TextStyle(color: mut(.4), fontSize: 11)),
+      ])),
+      Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(color: root ? kGreen.withOpacity(.15) : kYellow.withOpacity(.15),
+            borderRadius: BorderRadius.circular(8)),
+        child: Text(root ? 'ROOT' : 'SAFE',
+            style: TextStyle(color: root ? kGreen : kYellow,
+                fontSize: 9.5, fontWeight: FontWeight.w900, letterSpacing: 1))),
+    ]),
+  );
+
+  Widget _memCard() {
+    final t = int.tryParse(_memTotal.replaceAll(' MB','')) ?? 1;
+    final f = int.tryParse(_memFree.replaceAll(' MB',''))  ?? 0;
+    final u = t - f; final pct = (u/t).clamp(0.0, 1.0);
     return Container(
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-          color: kPanel,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: kBorder)),
+      decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(18), border: Border.all(color: kBorder)),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          Text('Terkunci:', style: TextStyle(color: mut(.55), fontSize: 12.5)),
-          const SizedBox(width: 6),
-          Text('${_hz}Hz',
-              style: const TextStyle(
-                  color: kPurple,
-                  fontFamily: 'monospace',
-                  fontWeight: FontWeight.w700,
-                  fontSize: 12.5)),
+          Icon(Icons.memory_rounded, color: kPurple, size: 18),
+          const SizedBox(width: 8),
+          Text('RAM Usage', style: TextStyle(color: kWhite, fontSize: 13, fontWeight: FontWeight.w700)),
           const Spacer(),
-          Text('Aktual: ${sys['refresh'] ?? '-'}',
-              style: TextStyle(
-                  color: mut(.35), fontSize: 11, fontFamily: 'monospace')),
+          Text('$u / $t MB', style: TextStyle(color: kPurple, fontSize: 12, fontWeight: FontWeight.w700, fontFamily: 'monospace')),
         ]),
-        const SizedBox(height: 14),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: [40, 60, 90, 120, 144].map((hz) {
-            final on = _hz == hz;
-            return GestureDetector(
-              onTap: () {
-                setState(() => _hz = hz);
-                _lastUserPick = DateTime.now();
-                runAction(() => RootService.setRefresh(hz),
-                    ok: '✅ Refresh dikunci ${hz}Hz',
-                    noRoot: 'Device membatasi refresh via root.');
-              },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                decoration: BoxDecoration(
-                  color: on ? kPurple : mut(.04),
-                  borderRadius: BorderRadius.circular(11),
-                  border: Border.all(color: on ? kPurple : Colors.transparent),
-                ),
-                child: Text('${hz}Hz',
-                    style: TextStyle(
-                        color: on ? Colors.black : kWhite,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12.5)),
-              ),
-            );
-          }).toList(),
-        ),
+        const SizedBox(height: 12),
+        ClipRRect(borderRadius: BorderRadius.circular(6), child: LinearProgressIndicator(
+          value: pct, minHeight: 8, backgroundColor: mut(.06),
+          valueColor: AlwaysStoppedAnimation(pct > .85 ? kRed : pct > .65 ? kYellow : kPurple))),
+        const SizedBox(height: 8),
+        Row(children: [
+          Text('Free: $_memFree', style: TextStyle(color: mut(.4), fontSize: 11)),
+          const Spacer(),
+          Text('${(pct*100).toStringAsFixed(0)}% used', style: TextStyle(color: mut(.4), fontSize: 11)),
+        ]),
       ]),
     );
   }
 
-  Widget _govCard(Map<String, String> sys) {
-    final opts = [
-      ['powersave', 'Hemat Daya', Icons.battery_saver_rounded, kGreen],
-      ['schedutil', 'Seimbang', Icons.tune_rounded, kCyan],
-      ['performance', 'Performa', Icons.rocket_launch_rounded, kYellow],
-    ];
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-          color: kPanel,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: kBorder)),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Container(
-            padding: const EdgeInsets.all(11),
-            decoration: BoxDecoration(
-                color: glow(kCyan, .1),
-                borderRadius: BorderRadius.circular(13)),
-            child: const Icon(Icons.bolt_rounded, color: kCyan, size: 22),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Mode Performa CPU',
-                    style: TextStyle(
-                        color: kWhite,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600)),
-                const SizedBox(height: 3),
-                Text('Governor aktif: ${sys['gov'] ?? 'schedutil'}',
-                    style: TextStyle(color: mut(.45), fontSize: 11.5)),
-              ],
+  Widget _tile(String label, String val, IconData icon, Color color) => Container(
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withOpacity(.18))),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Container(padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(color: color.withOpacity(.12), borderRadius: BorderRadius.circular(10)),
+        child: Icon(icon, color: color, size: 16)),
+      const Spacer(),
+      Text(val, style: TextStyle(color: color, fontSize: 15, fontWeight: FontWeight.w800, fontFamily: 'monospace')),
+      const SizedBox(height: 2),
+      Text(label, style: TextStyle(color: mut(.38), fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: .8)),
+    ]),
+  );
+
+  Widget _skel() => Container(height: 80, decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(18)),
+    child: Center(child: SizedBox(width: 22, height: 22,
+        child: CircularProgressIndicator(strokeWidth: 2, color: kCyan.withOpacity(.5)))));
+}
+
+// COMMAND TAB
+class CommandTab extends StatelessWidget {
+  const CommandTab({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    // Dihitung SEKALI per build (bukan 2x seperti sebelumnya), disimpan ke
+    // variabel lokal. Ini juga menghindari pola `if (_x() != null) _x()!`
+    // yang memanggil method yang sama dua kali untuk satu item.
+    final govGroup = _govGroup();
+    final freqGroup = _freqGroup();
+    final dt2wPath = DeviceInfo.i.dt2wPath;
+
+    return ValueListenableBuilder<bool>(
+      valueListenable: isNightNotifier,
+      builder: (_, __, ___) => SingleChildScrollView(
+        padding: const EdgeInsets.all(18),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _pageHeader('Command', 'Device Control Hub', kPurple),
+          const SizedBox(height: 10),
+          ValueListenableBuilder<bool>(
+            valueListenable: isRootNotifier,
+            builder: (_, root, __) => Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: root ? kGreen.withOpacity(.07) : kRed.withOpacity(.07),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: root ? kGreen.withOpacity(.25) : kRed.withOpacity(.25))),
+              child: Row(children: [
+                Icon(root ? Icons.check_circle_rounded : Icons.lock_rounded,
+                    color: root ? kGreen : kRed, size: 16),
+                const SizedBox(width: 8),
+                Expanded(child: Text(
+                  root ? 'Root aktif — semua perintah dapat dieksekusi'
+                       : 'Non-root — hanya info, tidak bisa ubah sistem',
+                  style: TextStyle(color: root ? kGreen : kRed, fontSize: 11.5))),
+              ]),
             ),
           ),
+          const SizedBox(height: 16),
+
+          // Banner info device terdeteksi
+          _deviceBanner(),
+          const SizedBox(height: 12),
+
+          // CPU GOVERNOR & FREKUENSI — pakai variabel yang sudah dihitung
+          // sekali di atas, bukan memanggil ulang method-nya.
+          if (govGroup != null) govGroup,
+          if (freqGroup != null) freqGroup,
+
+          _CmdGroup(icon: Icons.memory_rounded, label: 'RAM & Cache', accent: kPurple,
+            subtitle: 'Bersihkan memori',
+            children: [
+              _CmdLeaf('Clear Cache',     Icons.cleaning_services_rounded, kGreen,  'Bebaskan RAM cache',         cmd: 'sync; echo 3 > /proc/sys/vm/drop_caches'),
+              _CmdLeaf('Swappiness 10',   Icons.swap_horiz_rounded,        kBlue,   'Prioritaskan RAM',           cmd: 'echo 10 > /proc/sys/vm/swappiness'),
+              _CmdLeaf('Swappiness 60',   Icons.swap_vert_rounded,         kPurple, 'Seimbang (default)',         cmd: 'echo 60 > /proc/sys/vm/swappiness'),
+            ]),
+
+          _CmdGroup(icon: Icons.thermostat_rounded, label: 'Thermal', accent: kRed,
+            subtitle: 'Kontrol suhu & throttle',
+            children: [
+              _CmdLeaf('Baca Suhu', Icons.thermostat_rounded, kCyan, 'Lihat semua zone suhu', cmd: 'for z in /sys/class/thermal/thermal_zone*/temp; do t=\$(cat \$z 2>/dev/null); [ -n "\$t" ] && echo "\$z: \$t"; done', readOnly: true),
+              _CmdLeaf('Disable Throttle', Icons.warning_rounded,      kRed,   'Matikan throttle — pantau suhu!', cmd: 'echo disabled > /sys/class/thermal/thermal_zone0/mode'),
+              _CmdLeaf('Enable Throttle',  Icons.check_circle_rounded, kGreen, 'Aktifkan throttle kembali',       cmd: 'echo enabled > /sys/class/thermal/thermal_zone0/mode'),
+            ]),
+
+          _CmdGroup(icon: Icons.storage_rounded, label: 'I/O Scheduler', accent: kTeal,
+            subtitle: 'Optimasi storage',
+            children: [
+              _CmdLeaf('noop',     Icons.linear_scale_rounded, kGreen,  'Minimal overhead',     cmd: 'for d in /sys/block/*/queue/scheduler; do echo noop > \$d 2>/dev/null; done'),
+              _CmdLeaf('deadline', Icons.timer_rounded,        kOrange, 'Responsif I/O',        cmd: 'for d in /sys/block/*/queue/scheduler; do echo deadline > \$d 2>/dev/null; done'),
+            ]),
+
+          _CmdGroup(icon: Icons.dns_rounded, label: 'DNS Pribadi', accent: kBlue,
+            subtitle: 'Private DNS (DoT)',
+            children: [
+              _CmdLeaf('AdGuard',    Icons.shield_rounded,  kGreen,  'Blokir iklan & tracker',    cmd: 'settings put global private_dns_mode hostname; settings put global private_dns_specifier dns.adguard-dns.com'),
+              _CmdLeaf('Cloudflare', Icons.cloud_rounded,   kOrange, 'Cepat & privat (1.1.1.1)',  cmd: 'settings put global private_dns_mode hostname; settings put global private_dns_specifier one.one.one.one'),
+              _CmdLeaf('Quad9',      Icons.security_rounded, kBlue,   'Blokir situs berbahaya',    cmd: 'settings put global private_dns_mode hostname; settings put global private_dns_specifier dns.quad9.net'),
+              _CmdLeaf('Google',     Icons.public_rounded,   kCyan,   'DNS Google (8.8.8.8)',      cmd: 'settings put global private_dns_mode hostname; settings put global private_dns_specifier dns.google'),
+              _CmdLeaf('Matikan DNS Pribadi', Icons.power_settings_new_rounded, kRed, 'Kembali ke otomatis', cmd: 'settings put global private_dns_mode off'),
+              _CmdLeaf('Cek DNS Aktif', Icons.search_rounded, kPurple, 'Lihat private DNS sekarang', cmd: 'settings get global private_dns_specifier', readOnly: true),
+            ]),
+
+          _CmdGroup(icon: Icons.network_check_rounded, label: 'TCP Network', accent: kGreen,
+            subtitle: 'Congestion control',
+            children: [
+              _CmdLeaf('TCP BBR',   Icons.compress_rounded,   kGreen,  'Algoritma Google BBR', cmd: 'echo bbr > /proc/sys/net/ipv4/tcp_congestion_control'),
+              _CmdLeaf('TCP Cubic', Icons.show_chart_rounded, kPurple, 'Default Linux',        cmd: 'echo cubic > /proc/sys/net/ipv4/tcp_congestion_control'),
+            ]),
+
+          // DT2W — hanya tampil kalau path gesture terdeteksi
+          if (dt2wPath != null) _dt2wGroup(dt2wPath),
+
+          _CmdGroup(icon: Icons.settings_rounded, label: 'System', accent: kYellow,
+            subtitle: 'Info & reboot',
+            children: [
+              _CmdLeaf('Info Build', Icons.info_rounded,        kCyan,  'Model & versi Android',  cmd: 'getprop ro.product.model; getprop ro.board.platform; getprop ro.build.version.release', readOnly: true),
+              _CmdLeaf('Clear Logcat', Icons.delete_rounded,    kOrange,'Bersihkan buffer log',   cmd: 'logcat -c'),
+              _CmdLeaf('Reboot', Icons.restart_alt_rounded,     kRed,   'Reboot perangkat',       cmd: 'reboot'),
+            ]),
+
+          const SizedBox(height: 20),
         ]),
-        const SizedBox(height: 14),
-        Row(
-          children: opts.map((o) {
-            final val = o[0] as String;
-            final label = o[1] as String;
-            final ic = o[2] as IconData;
-            final c = o[3] as Color;
-            final on = _gov == val;
-            final last = o == opts.last;
-            return Expanded(
-              child: Padding(
-                padding: EdgeInsets.only(right: last ? 0 : 8),
-                child: GestureDetector(
-                  onTap: () {
-                    setState(() => _gov = val);
-                    _lastUserPick = DateTime.now();
-                    runAction(() => RootService.setGov(val),
-                        ok: '✅ Governor: $val',
-                        noRoot: 'Governor ini tak didukung kernel.');
-                  },
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    padding: const EdgeInsets.symmetric(vertical: 10),
-                    decoration: BoxDecoration(
-                      color: on ? glow(c, .15) : mut(.04),
-                      borderRadius: BorderRadius.circular(11),
-                      border:
-                          Border.all(color: on ? c : Colors.transparent),
-                    ),
-                    child: Column(children: [
-                      Icon(ic, size: 16, color: on ? c : mut(.35)),
-                      const SizedBox(height: 4),
-                      Text(label,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w700,
-                              color: on ? c : mut(.4))),
-                    ]),
-                  ),
-                ),
-              ),
-            );
-          }).toList(),
-        ),
+      ),
+    );
+  }
+
+  // Banner info device hasil deteksi otomatis
+  Widget _deviceBanner() {
+    final d = DeviceInfo.i;
+    final accent = d.spoofSuspected ? kYellow : kCyan;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: accent.withOpacity(.06),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: accent.withOpacity(.2))),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(Icons.phone_android_rounded, color: accent, size: 18),
+        const SizedBox(width: 10),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(d.displayName,
+              style: TextStyle(color: kWhite, fontSize: 12.5, fontWeight: FontWeight.w700)),
+          Text('${d.platform} · ${d.cpuCores} core · Android ${d.androidVer}',
+              style: TextStyle(color: mut(.4), fontSize: 10.5)),
+          if (d.spoofSuspected) ...[
+            const SizedBox(height: 3),
+            Text('⚠️ Brand tidak konsisten dengan chipset — kemungkinan device spoofing aktif',
+                style: TextStyle(color: kYellow, fontSize: 9.5, height: 1.3)),
+          ],
+        ])),
       ]),
+    );
+  }
+
+  // Group governor dinamis — hanya yang didukung
+  _CmdGroup? _govGroup() {
+    final govs = DeviceInfo.i.governors;
+    if (govs.isEmpty) return null;
+    // ikon & deskripsi per governor umum
+    const meta = {
+      'performance':  ['Semua core max — gaming', Icons.flash_on_rounded, kRed],
+      'powersave':    ['Hemat daya maksimal', Icons.battery_saver_rounded, kGreen],
+      'schedutil':    ['Adaptif — rekomendasi harian', Icons.schedule_rounded, kCyan],
+      'ondemand':     ['Naik cepat saat butuh', Icons.trending_up_rounded, kOrange],
+      'conservative': ['Naik pelan — hemat', Icons.trending_down_rounded, kBlue],
+      'interactive':  ['Responsif untuk UI', Icons.touch_app_rounded, kPurple],
+    };
+    final leaves = govs.map((g) {
+      final m = meta[g];
+      final desc = m != null ? m[0] as String : 'Governor $g';
+      final ic   = m != null ? m[1] as IconData : Icons.tune_rounded;
+      final col  = m != null ? m[2] as Color : kTeal;
+      return _CmdLeaf(g, ic, col, desc,
+          cmd: 'for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo $g > \$f; done');
+    }).toList();
+    return _CmdGroup(icon: Icons.developer_board_rounded, label: 'CPU Governor', accent: kCyan,
+        subtitle: '${govs.length} governor terdeteksi', children: leaves);
+  }
+
+  // Group frekuensi dinamis — dari daftar frekuensi device
+  _CmdGroup? _freqGroup() {
+    final choices = DeviceInfo.i.freqChoices;
+    if (choices.isEmpty) return null;
+    final icons = [Icons.rocket_launch_rounded, Icons.bolt_rounded, Icons.eco_rounded, Icons.battery_saver_rounded];
+    final colors = [kRed, kOrange, kGreen, kBlue];
+    final descs = ['Full speed', 'Tinggi', 'Sedang', 'Hemat daya'];
+    final leaves = <_CmdLeaf>[];
+    for (int i = 0; i < choices.length; i++) {
+      final khz = choices[i];
+      final mhz = (khz / 1000).round();
+      leaves.add(_CmdLeaf('$mhz MHz',
+          icons[i.clamp(0, icons.length - 1)],
+          colors[i.clamp(0, colors.length - 1)],
+          descs[i.clamp(0, descs.length - 1)],
+          cmd: 'for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo $khz > \$f; done'));
+    }
+    return _CmdGroup(icon: Icons.speed_rounded, label: 'CPU Frekuensi Max', accent: kOrange,
+        subtitle: '${DeviceInfo.i.freqsKhz.length} step tersedia', children: leaves);
+  }
+
+  // Group DT2W dinamis — pakai path yang terdeteksi
+  _CmdGroup _dt2wGroup(String p) {
+    return _CmdGroup(icon: Icons.touch_app_rounded, label: 'Layar & Gesture', accent: kPink,
+      subtitle: 'Double tap to wake',
+      children: [
+        _CmdLeaf('Double Tap to Wake: ON',  Icons.touch_app_rounded,    kGreen, 'Ketuk 2x nyalakan layar', cmd: 'echo 1 > $p'),
+        _CmdLeaf('Double Tap to Wake: OFF', Icons.do_not_touch_rounded, kRed,   'Matikan gesture wake',    cmd: 'echo 0 > $p'),
+        _CmdLeaf('Cek Status DT2W', Icons.search_rounded, kCyan, 'Lihat status gesture', cmd: 'cat $p', readOnly: true),
+      ]);
+  }
+}
+
+// CMD GROUP
+class _CmdGroup extends StatelessWidget {
+  final IconData icon;
+  final String label, subtitle;
+  final Color accent;
+  final List<_CmdLeaf> children;
+  const _CmdGroup({required this.icon, required this.label, required this.subtitle, required this.accent, required this.children});
+
+  void _open(BuildContext context) {
+    HapticFeedback.selectionClick();
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: label,
+      barrierColor: Colors.black.withOpacity(.65),
+      transitionDuration: const Duration(milliseconds: 240),
+      pageBuilder: (_, __, ___) => const SizedBox.shrink(),
+      transitionBuilder: (ctx, anim, _, __) {
+        final c = CurvedAnimation(parent: anim, curve: Curves.easeOutCubic);
+        return Transform.scale(scale: 0.92 + 0.08 * c.value,
+          child: Opacity(opacity: c.value,
+            child: _CmdDialog(icon: icon, label: label, subtitle: subtitle, accent: accent, children: children)));
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: ValueListenableBuilder<bool>(
+        valueListenable: isNightNotifier,
+        builder: (_, __, ___) => GestureDetector(
+          onTap: () => _open(context),
+          behavior: HitTestBehavior.opaque,
+          child: Container(
+            decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: kBorder)),
+            child: Padding(padding: const EdgeInsets.all(14), child: Row(children: [
+              Container(padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: accent.withOpacity(.12),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: accent.withOpacity(.2))),
+                child: Icon(icon, color: accent, size: 20)),
+              const SizedBox(width: 12),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(label, style: TextStyle(color: kWhite, fontSize: 14, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Text(subtitle, style: TextStyle(color: mut(.35), fontSize: 10.5), maxLines: 1, overflow: TextOverflow.ellipsis),
+              ])),
+              Container(padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(color: accent.withOpacity(.12), borderRadius: BorderRadius.circular(8)),
+                child: Text('${children.length}', style: TextStyle(color: accent, fontSize: 11, fontWeight: FontWeight.w800))),
+              const SizedBox(width: 8),
+              Icon(Icons.open_in_full_rounded, color: mut(.3), size: 16),
+            ])),
+          ),
+        ),
+      ),
     );
   }
 }
 
-// ============================================================
-// TOOLS TAB
-// ============================================================
-class ToolsTab extends StatelessWidget {
-  const ToolsTab({super.key});
+// DIALOG isi opsi
+class _CmdDialog extends StatelessWidget {
+  final IconData icon;
+  final String label, subtitle;
+  final Color accent;
+  final List<_CmdLeaf> children;
+  const _CmdDialog({required this.icon, required this.label, required this.subtitle, required this.accent, required this.children});
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-      children: [
-        pageTitleRow('Tools', 'Utilitas & informasi perangkat'),
-        const SizedBox(height: 24),
-        _sectionTitle('INFORMASI CHIPSET', kCyan),
-        const SizedBox(height: 12),
-        ValueListenableBuilder<Map<String, String>>(
-          valueListenable: deviceNotifier,
-          builder: (_, d, __) => ValueListenableBuilder<Map<String, String>>(
-            valueListenable: sysNotifier,
-            builder: (_, sys, __) => Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                  color: kPanel,
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: kBorder)),
-              child: Column(children: [
-                _infoRow('Perangkat', d['name'] ?? '-'),
-                _infoRow('Versi OS', d['android'] ?? '-'),
-                _infoRow('Chipset', d['chipset'] ?? '-'),
-                _infoRow('CPU Sekarang', sys['freq'] ?? '-'),
-                _infoRow('CPU Maksimum', sys['max_freq'] ?? '-'),
-                _infoRow('Governor', sys['gov'] ?? '-'),
+    return ValueListenableBuilder<bool>(
+      valueListenable: isNightNotifier,
+      builder: (_, __, ___) => Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.72, maxWidth: 440),
+              decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: accent.withOpacity(.35)),
+                boxShadow: [
+                  BoxShadow(color: accent.withOpacity(.15), blurRadius: 40, spreadRadius: -4),
+                  BoxShadow(color: Colors.black.withOpacity(.4), blurRadius: 30),
+                ]),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Padding(padding: const EdgeInsets.fromLTRB(18, 18, 14, 14),
+                  child: Row(children: [
+                    Container(padding: const EdgeInsets.all(11),
+                      decoration: BoxDecoration(color: accent.withOpacity(.14),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: accent.withOpacity(.3))),
+                      child: Icon(icon, color: accent, size: 22)),
+                    const SizedBox(width: 12),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text(label, style: TextStyle(color: kWhite, fontSize: 16, fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 2),
+                      Text(subtitle, style: TextStyle(color: mut(.4), fontSize: 10.5), maxLines: 2, overflow: TextOverflow.ellipsis),
+                    ])),
+                    const SizedBox(width: 8),
+                    GestureDetector(onTap: () => Navigator.pop(context),
+                      child: Container(padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(color: mut(.06), shape: BoxShape.circle),
+                        child: Icon(Icons.close_rounded, color: mut(.5), size: 18))),
+                  ])),
+                Divider(height: 1, color: kBorder),
+                Flexible(child: SingleChildScrollView(padding: const EdgeInsets.all(12),
+                  child: Column(children: children))),
               ]),
             ),
           ),
         ),
-        const SizedBox(height: 22),
-        _sectionTitle('REBOOT PERANGKAT', kRed),
-        const SizedBox(height: 12),
-        _rebootCard(context),
-        const SizedBox(height: 22),
-        _sectionTitle('LAINNYA', kGreen),
-        const SizedBox(height: 12),
-        _toolTile(Icons.developer_mode_rounded, 'Buka Pengaturan Developer',
-            'Akses opsi pengembang sistem', kGreen, () {
-          runAction(() => RootService.run('am start -a android.settings.APPLICATION_DEVELOPMENT_SETTINGS && echo OK'),
-              ok: '✅ Membuka pengaturan developer');
-        }),
-        const SizedBox(height: 10),
-        _toolTile(Icons.bedtime_rounded, 'Tutup Semua Aplikasi Latar',
-            'Hentikan app berjalan di background', kPurple, () {
-          runAction(RootService.clearRam, ok: '✅ Aplikasi latar dihentikan');
-        }),
-        const SizedBox(height: 22),
-        _sectionTitle('JARINGAN & SISTEM', kTeal),
-        const SizedBox(height: 12),
-        _toolTile(Icons.dns_rounded, 'Flush DNS Cache',
-            'Bersihkan cache DNS untuk koneksi lebih segar', kTeal, () {
-          runAction(RootService.flushDns, ok: '✅ DNS cache dibersihkan');
-        }),
-        const SizedBox(height: 10),
-        _toolTile(Icons.airplanemode_active_rounded, 'Refresh Sinyal',
-            'Toggle airplane mode cepat untuk cari sinyal', kCyan, () {
-          runAction(RootService.refreshSignal,
-              ok: '✅ Sinyal di-refresh', noRoot: 'Butuh root aktif.');
-        }),
-        const SizedBox(height: 10),
-        _toolTile(Icons.delete_sweep_rounded, 'Bersihkan Cache Aplikasi',
-            'Hapus cache semua aplikasi untuk lega penyimpanan', kOrange, () {
-          runAction(RootService.trimCaches, ok: '✅ Cache aplikasi dibersihkan');
-        }),
-        const SizedBox(height: 10),
-        _toolTile(Icons.battery_saver_rounded, 'Kalibrasi Baterai',
-            'Reset statistik baterai (batterystats)', kGreen, () {
-          runAction(RootService.resetBatteryStats,
-              ok: '✅ Statistik baterai direset');
-        }),
-        const SizedBox(height: 22),
-        _sectionTitle('PINTASAN PENGATURAN', kPurple),
-        const SizedBox(height: 12),
-        _toolTile(Icons.display_settings_rounded, 'Pengaturan Layar',
-            'Buka pengaturan tampilan & refresh rate', kPurple, () {
-          runAction(
-              () => RootService.run(
-                  'am start -a android.settings.DISPLAY_SETTINGS && echo OK'),
-              ok: '✅ Membuka pengaturan layar');
-        }),
-        const SizedBox(height: 10),
-        _toolTile(Icons.apps_rounded, 'Info Aplikasi',
-            'Buka daftar & info semua aplikasi', kCyan, () {
-          runAction(
-              () => RootService.run(
-                  'am start -a android.settings.APPLICATION_SETTINGS && echo OK'),
-              ok: '✅ Membuka info aplikasi');
-        }),
-        const SizedBox(height: 10),
-        _toolTile(Icons.battery_charging_full_rounded, 'Pengaturan Baterai',
-            'Buka pengaturan & penghemat baterai', kGreen, () {
-          runAction(
-              () => RootService.run(
-                  'am start -a android.settings.BATTERY_SAVER_SETTINGS && echo OK'),
-              ok: '✅ Membuka pengaturan baterai');
-        }),
-      ],
-    );
-  }
-
-  Widget _infoRow(String k, String v) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 9),
-      child: Row(children: [
-        SizedBox(
-            width: 90,
-            child: Text(k, style: TextStyle(color: mut(.45), fontSize: 12.5))),
-        Expanded(
-          child: Text(v,
-              textAlign: TextAlign.right,
-              style: TextStyle(
-                  color: kWhite,
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  fontFamily: 'monospace')),
-        ),
-      ]),
-    );
-  }
-
-  Widget _toolTile(IconData ic, String title, String sub, Color c,
-      VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-            color: kPanel,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: kBorder)),
-        child: Row(children: [
-          Container(
-            padding: const EdgeInsets.all(11),
-            decoration: BoxDecoration(
-                color: glow(c, .1), borderRadius: BorderRadius.circular(13)),
-            child: Icon(ic, color: c, size: 22),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title,
-                      style: TextStyle(
-                          color: kWhite,
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 3),
-                  Text(sub, style: TextStyle(color: mut(.45), fontSize: 11.5)),
-                ]),
-          ),
-          Icon(Icons.chevron_right_rounded, color: mut(.3), size: 20),
-        ]),
       ),
     );
   }
+}
 
-  Widget _rebootCard(BuildContext context) {
-    return _controlCard(
-      Icons.restart_alt_rounded,
-      'Reboot Device',
-      'System / Recovery / Fastboot',
-      'Reboot',
-      kRed,
-      () => _showRebootSheet(context),
-    );
+// CMD LEAF — sekali tekan langsung eksekusi
+class _CmdLeaf extends StatefulWidget {
+  final String label, desc, cmd;
+  final IconData icon;
+  final Color color;
+  final bool readOnly;
+  const _CmdLeaf(this.label, this.icon, this.color, this.desc, {required this.cmd, this.readOnly = false});
+  @override
+  State<_CmdLeaf> createState() => _CmdLeafState();
+}
+
+class _CmdLeafState extends State<_CmdLeaf> {
+  bool _running = false;
+  bool _flash = false; // efek kilat sukses sesaat
+
+  Future<void> _exec() async {
+    if (_running) return;
+    if (!isRootNotifier.value) { _snack('⚠ Butuh root untuk perintah ini', kYellow); return; }
+    setState(() => _running = true);
+    HapticFeedback.mediumImpact();
+    try {
+      final out = await runRoot(widget.cmd);
+      if (!mounted) return;
+      final isError = out.startsWith('ERR') || out.startsWith('ERROR');
+      if (widget.readOnly) {
+        if (out.isNotEmpty && out != 'OK') { _showSheet(out); }
+        else { _snack('📋 Selesai', widget.color); }
+      } else if (isError) {
+        _snack('✗ Gagal: ${out.replaceFirst(RegExp(r"ERR:?R?:? "), "")}', kRed);
+      } else {
+        // kilat hijau sukses sesaat
+        setState(() => _flash = true);
+        _snack('✓ ${widget.label} diterapkan', widget.color);
+        Future.delayed(const Duration(milliseconds: 600), () { if (mounted) setState(() => _flash = false); });
+      }
+    } catch (e) {
+      // Jaring pengaman terakhir: exception tak terduga (mis. proses
+      // terputus) tidak boleh membuat tombol nyangkut ter-disable selamanya.
+      if (mounted) _snack('✗ Gagal: $e', kRed);
+    } finally {
+      if (mounted) setState(() => _running = false);
+    }
   }
 
-  void _showRebootSheet(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: kPanel,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Container(
-              width: 40,
-              height: 4,
-              margin: const EdgeInsets.only(bottom: 16),
+  void _snack(String msg, Color c) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    content: Text(msg, style: const TextStyle(fontWeight: FontWeight.w600)),
+    backgroundColor: kPanel2, duration: const Duration(milliseconds: 1800),
+    behavior: SnackBarBehavior.floating,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+
+  void _showSheet(String result) {
+    showModalBottomSheet(context: context, backgroundColor: kPanel, isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => DraggableScrollableSheet(expand: false, initialChildSize: .5, maxChildSize: .9,
+        builder: (_, sc) => Column(children: [
+          Container(margin: const EdgeInsets.only(top: 10), width: 36, height: 4,
+            decoration: BoxDecoration(color: mut(.2), borderRadius: BorderRadius.circular(2))),
+          Padding(padding: const EdgeInsets.fromLTRB(20,14,20,0),
+            child: Row(children: [
+              Icon(widget.icon, color: widget.color, size: 18),
+              const SizedBox(width: 8),
+              Text(widget.label, style: TextStyle(color: kWhite, fontSize: 15, fontWeight: FontWeight.w700)),
+              const Spacer(),
+              GestureDetector(onTap: () => Navigator.pop(context),
+                child: Icon(Icons.close_rounded, color: mut(.4), size: 20)),
+            ])),
+          Expanded(child: SingleChildScrollView(controller: sc, padding: const EdgeInsets.all(20),
+            child: SelectableText(result, style: TextStyle(color: kCyan, fontSize: 11.5, fontFamily: 'monospace', height: 1.6)))),
+          Padding(padding: const EdgeInsets.all(16),
+            child: SizedBox(width: double.infinity,
+              child: ElevatedButton(onPressed: () => Navigator.pop(context),
+                style: ElevatedButton.styleFrom(backgroundColor: widget.color.withOpacity(.15),
+                  foregroundColor: widget.color, elevation: 0,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                child: const Text('Tutup')))),
+        ])));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: isRootNotifier,
+      builder: (_, root, __) {
+        final locked = !root && !widget.readOnly;
+        return Padding(padding: const EdgeInsets.only(bottom: 6),
+          child: GestureDetector(
+            onTap: locked ? () => _snack('⚠ Butuh root', kYellow) : _exec,
+            child: AnimatedContainer(duration: const Duration(milliseconds: 200),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               decoration: BoxDecoration(
-                  color: mut(.2), borderRadius: BorderRadius.circular(2)),
+                color: _flash ? widget.color.withOpacity(.18) : locked ? mut(.03) : kPanel2,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: _flash ? widget.color.withOpacity(.5) : kBorder.withOpacity(.4))),
+              child: Row(children: [
+                Container(width: 2.5, height: 36,
+                  decoration: BoxDecoration(color: locked ? mut(.15) : widget.color.withOpacity(.55), borderRadius: BorderRadius.circular(2))),
+                const SizedBox(width: 12),
+                Icon(locked ? Icons.lock_rounded : widget.icon, color: locked ? mut(.3) : widget.color, size: 18),
+                const SizedBox(width: 10),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(widget.label, style: TextStyle(color: locked ? mut(.4) : kWhite,
+                      fontSize: 12.5, fontWeight: FontWeight.w600)),
+                  Text(widget.desc, style: TextStyle(color: mut(.3), fontSize: 10.5)),
+                ])),
+                const SizedBox(width: 8),
+                if (_running)
+                  SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: widget.color))
+                else if (_flash)
+                  Icon(Icons.check_circle_rounded, color: widget.color, size: 20)
+                else if (widget.readOnly)
+                  Icon(Icons.search_rounded, color: mut(.35), size: 18)
+                else
+                  Icon(Icons.play_arrow_rounded, color: locked ? mut(.2) : widget.color.withOpacity(.7), size: 22),
+              ]),
             ),
-            Text('Pilih Mode Reboot',
-                style: TextStyle(
-                    color: kWhite, fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 16),
-            _rebootOpt(ctx, Icons.restart_alt_rounded, kCyan, 'Reboot System',
-                'Restart normal', RootService.rebootSystem),
-            _rebootOpt(ctx, Icons.build_circle_outlined, kYellow,
-                'Reboot Recovery', 'Masuk mode recovery',
-                RootService.rebootRecovery),
-            _rebootOpt(ctx, Icons.usb_rounded, kPurple, 'Reboot Fastboot',
-                'Masuk mode bootloader', RootService.rebootFastboot),
-            const SizedBox(height: 8),
-          ]),
-        ),
-      ),
-    );
-  }
-
-  Widget _rebootOpt(BuildContext ctx, IconData ic, Color c, String label,
-      String desc, Future<String> Function() act) {
-    return ListTile(
-      leading: Container(
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-            color: glow(c, .1), borderRadius: BorderRadius.circular(12)),
-        child: Icon(ic, color: c, size: 22),
-      ),
-      title: Text(label,
-          style: TextStyle(
-              color: kWhite, fontWeight: FontWeight.w600, fontSize: 14)),
-      subtitle:
-          Text(desc, style: TextStyle(color: mut(.5), fontSize: 12)),
-      onTap: () {
-        Navigator.pop(ctx);
-        showDialog(
-          context: ctx,
-          builder: (d) => AlertDialog(
-            backgroundColor: kPanel,
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: Text('Konfirmasi',
-                style: TextStyle(color: kWhite)),
-            content: Text('Jalankan "$label"? Perangkat akan restart sekarang.',
-                style: TextStyle(color: mut(.7))),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(d),
-                  child: const Text('Batal')),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: kRed, foregroundColor: Colors.white),
-                onPressed: () {
-                  Navigator.pop(d);
-                  runAction(act,
-                      ok: '✅ $label...',
-                      noRoot: 'Gagal reboot. Pastikan root aktif.');
-                },
-                child: const Text('Ya, Reboot'),
-              ),
-            ],
           ),
         );
       },
@@ -1651,420 +1117,322 @@ class ToolsTab extends StatelessWidget {
   }
 }
 
-// ============================================================
-// DOUBLE TAP TO WAKE TILE
-// ============================================================
-// Beberapa HP (terutama Infinix/Transsion) suka menonaktifkan sendiri
-// opsi "ketuk 2 kali untuk membangunkan" setelah reboot/update. Widget
-// ini menampilkan status terkini dan tombol "Aktifkan Ulang" yang bisa
-// ditekan sewaktu-waktu kalau fiturnya ke-disable otomatis lagi.
-class _DoubleTapWakeTile extends StatefulWidget {
-  const _DoubleTapWakeTile();
+// TOOLS TAB
+class ToolsTab extends StatefulWidget {
+  const ToolsTab({super.key});
   @override
-  State<_DoubleTapWakeTile> createState() => _DoubleTapWakeTileState();
+  State<ToolsTab> createState() => _ToolsTabState();
 }
 
-class _DoubleTapWakeTileState extends State<_DoubleTapWakeTile> {
-  bool? _active;
-  bool _loading = true;
-  bool _nodeExists = true; // optimis sampai terbukti tidak ada
-
-  @override
-  void initState() {
-    super.initState();
-    _refresh();
-  }
-
-  Future<void> _refresh() async {
-    final exists = await RootService.doubleTapWakeNodeExists();
-    final s = await RootService.doubleTapWakeStatus();
-    if (mounted) {
-      setState(() {
-        _nodeExists = exists;
-        _active = s == '1';
-        _loading = false;
-      });
+class _ToolsTabState extends State<ToolsTab> {
+  Future<void> _run(String cmd, {bool needRoot = false}) async {
+    if (needRoot && !isRootNotifier.value) {
+      _sheet('Butuh Root', 'Fitur ini memerlukan akses root aktif.', kYellow); return;
     }
-  }
-
-  Future<void> _toggle() async {
-    setState(() => _loading = true);
-    final on = _active != true;
-    final res = on
-        ? await RootService.enableDoubleTapWake()
-        : await RootService.disableDoubleTapWake();
-    if (!mounted) return;
-    if (RootService.bad(res) || res.startsWith('FAIL:')) {
-      _showSnack(context, on
-          ? '⚠️ Gagal mengaktifkan. Pastikan root aktif.'
-          : '⚠️ Gagal menonaktifkan. Pastikan root aktif.');
+    String out = '';
+    if (isRootNotifier.value) {
+      out = await runRoot(cmd);
+      if (out == 'OK') out = '';
     } else {
-      _showSnack(context, on
-          ? '✅ Ketuk 2x untuk bangun diaktifkan'
-          : '✅ Ketuk 2x untuk bangun dinonaktifkan');
+      try { final r = await Process.run('sh', ['-c', cmd]); out = r.stdout.toString().trim(); if (out.isEmpty) out = r.stderr.toString().trim(); }
+      catch (e) { out = 'Error: $e'; }
     }
-    await _refresh();
+    _sheet(cmd.split(';')[0].split('|')[0].trim(), out.isEmpty ? 'Tidak ada output' : out, kCyan);
   }
 
-  void _showSnack(BuildContext context, String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), backgroundColor: kPanel2),
-    );
+  void _sheet(String title, String content, Color color) {
+    showModalBottomSheet(context: context, backgroundColor: kPanel, isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => DraggableScrollableSheet(expand: false, initialChildSize: .5, maxChildSize: .9,
+        builder: (_, sc) => Column(children: [
+          Container(margin: const EdgeInsets.only(top: 10), width: 36, height: 4,
+            decoration: BoxDecoration(color: mut(.2), borderRadius: BorderRadius.circular(2))),
+          Padding(padding: const EdgeInsets.fromLTRB(20,14,20,0),
+            child: Row(children: [
+              Text(title, style: TextStyle(color: kWhite, fontSize: 14, fontWeight: FontWeight.w700), maxLines: 1, overflow: TextOverflow.ellipsis),
+              const Spacer(),
+              GestureDetector(onTap: () => Navigator.pop(context), child: Icon(Icons.close_rounded, color: mut(.4), size: 20)),
+            ])),
+          Expanded(child: SingleChildScrollView(controller: sc, padding: const EdgeInsets.all(20),
+            child: SelectableText(content, style: TextStyle(color: color, fontSize: 11.5, fontFamily: 'monospace', height: 1.6)))),
+        ])));
   }
 
   @override
   Widget build(BuildContext context) {
-    final on = _active == true;
-    String subtitle;
-    Color subtitleColor;
-    if (_loading) {
-      subtitle = 'Memeriksa status...';
-      subtitleColor = mut(.45);
-    } else if (!_nodeExists) {
-      subtitle = 'Tidak didukung (akses root nonaktif?)';
-      subtitleColor = kYellow;
-    } else if (on) {
-      subtitle = 'Aktif — dipulihkan otomatis tiap buka app';
-      subtitleColor = kGreen;
-    } else {
-      subtitle = 'Nonaktif — tekan untuk mengaktifkan';
-      subtitleColor = mut(.5);
-    }
-
     return ValueListenableBuilder<bool>(
-      valueListenable: busyNotifier,
-      builder: (_, busy, __) => Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-            color: kPanel,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: kBorder)),
-        child: Row(children: [
-          Container(
-            padding: const EdgeInsets.all(11),
-            decoration: BoxDecoration(
-                color: glow(kTeal, .1), borderRadius: BorderRadius.circular(13)),
-            child: Icon(Icons.touch_app_rounded, color: kTeal, size: 22),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Ketuk 2x untuk Bangun',
-                  style: TextStyle(
-                      color: kWhite, fontSize: 14, fontWeight: FontWeight.w600)),
-              const SizedBox(height: 3),
-              Text(subtitle, style: TextStyle(color: subtitleColor, fontSize: 11.5)),
-            ]),
-          ),
-          const SizedBox(width: 10),
-          if (_loading)
-            const SizedBox(
-                width: 20, height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2, color: kTeal))
-          else
-            ElevatedButton(
-              onPressed: busy ? null : _toggle,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: glow(kTeal, .15),
-                foregroundColor: kTeal,
-                disabledBackgroundColor: mut(.05),
-                disabledForegroundColor: mut(.3),
-                side: BorderSide(color: busy ? Colors.transparent : kTeal),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(11)),
-                elevation: 0,
-              ),
-              child: Text(on ? 'Aktif ✓' : 'Aktifkan',
-                  style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold)),
-            ),
+      valueListenable: isNightNotifier,
+      builder: (_, __, ___) => SingleChildScrollView(
+        padding: const EdgeInsets.all(18),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _pageHeader('Tools', 'System Utilities', kOrange),
+          const SizedBox(height: 18),
+
+          _sectionLabel('INFO (TANPA ROOT)', kCyan),
+          const SizedBox(height: 10),
+          _tool('CPU Info', 'Model, core, frekuensi, BogoMIPS', Icons.developer_board_rounded, kCyan, false,
+              'cat /proc/cpuinfo | grep -E "model name|processor|cpu MHz|BogoMIPS|Hardware" | head -20'),
+          _tool('Memory Detail', 'MemTotal, MemFree, Cached, Swap', Icons.memory_rounded, kPurple, false, 'cat /proc/meminfo'),
+          _tool('Battery Detail', 'Status, kapasitas, suhu', Icons.battery_full_rounded, kGreen, false,
+              'cat /sys/class/power_supply/battery/uevent 2>/dev/null || cat /sys/class/power_supply/*/uevent 2>/dev/null'),
+          _tool('Suhu Thermal', 'Semua zone thermal MT6895', Icons.thermostat_rounded, kRed, false,
+              'for i in \$(seq 0 20); do t=\$(cat /sys/class/thermal/thermal_zone\$i/temp 2>/dev/null); [ -n "\$t" ] && echo "Zone\$i: \$t"; done'),
+          _tool('Uptime & Load', 'Uptime dan load average sistem', Icons.timer_rounded, kTeal, false,
+              'uptime; echo "---"; cat /proc/loadavg; echo "---"; cat /proc/uptime'),
+          _tool('Disk Usage', 'Partisi dan penggunaan storage', Icons.storage_rounded, kOrange, false, 'df -h'),
+          _tool('Network Info', 'IP, interface, DNS aktif', Icons.wifi_rounded, kBlue, false,
+              'ip addr show 2>/dev/null; echo "---"; getprop net.dns1; getprop net.dns2'),
+          _tool('Android Props', 'Build, model, versi OS', Icons.android_rounded, kGreen, false,
+              'getprop ro.product.model; getprop ro.board.platform; getprop ro.build.version.release; getprop ro.product.manufacturer'),
+
+          const SizedBox(height: 18),
+          _sectionLabel('ROOT TOOLS', kRed),
+          const SizedBox(height: 10),
+          _tool('Kernel Log', 'dmesg 30 baris terakhir', Icons.article_rounded, kRed, true, 'dmesg | tail -30'),
+          _tool('Proses Berjalan', 'Snapshot proses aktif', Icons.list_alt_rounded, kOrange, true, 'ps aux | head -25'),
+          _tool('Governor Semua Core', 'Governor aktif tiap core CPU', Icons.tune_rounded, kCyan, true,
+              'for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "\$c: \$(cat \$c 2>/dev/null)"; done'),
+          _tool('Frekuensi Semua Core', 'Frekuensi aktif tiap core CPU', Icons.speed_rounded, kBlue, true,
+              'for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq; do echo "\$c: \$(cat \$c 2>/dev/null)"; done'),
+          _tool('Modules Kernel', 'List modul kernel yang terload', Icons.extension_rounded, kTeal, true, 'lsmod | head -25'),
+          _tool('Swappiness Saat Ini', 'Baca nilai swappiness aktif', Icons.swap_horiz_rounded, kPurple, true, 'cat /proc/sys/vm/swappiness'),
+          _tool('TCP Congestion Aktif', 'Algoritma TCP congestion aktif', Icons.compress_rounded, kGreen, true,
+              'cat /proc/sys/net/ipv4/tcp_congestion_control'),
+          _tool('I/O Scheduler Aktif', 'Scheduler storage tiap block device', Icons.storage_rounded, kOrange, true,
+              'for d in /sys/block/*/queue/scheduler; do echo "\$d:"; cat \$d 2>/dev/null; echo; done'),
+
+          const SizedBox(height: 20),
         ]),
       ),
     );
   }
+
+  Widget _tool(String title, String sub, IconData icon, Color color, bool needRoot, String cmd) {
+    return Padding(padding: const EdgeInsets.only(bottom: 8),
+      child: ValueListenableBuilder<bool>(
+        valueListenable: isRootNotifier,
+        builder: (_, root, __) {
+          final locked = needRoot && !root;
+          return GestureDetector(
+            onTap: () => _run(cmd, needRoot: needRoot),
+            child: Container(padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(16), border: Border.all(color: locked ? kBorder.withOpacity(.4) : kBorder)),
+              child: Row(children: [
+                Container(padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: locked ? mut(.05) : color.withOpacity(.12), borderRadius: BorderRadius.circular(12)),
+                  child: Icon(locked ? Icons.lock_rounded : icon, color: locked ? mut(.3) : color, size: 20)),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(title, style: TextStyle(color: locked ? mut(.4) : kWhite, fontSize: 13.5, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  Text(sub, style: TextStyle(color: mut(.35), fontSize: 11)),
+                ])),
+                Icon(Icons.play_circle_rounded, color: locked ? mut(.2) : color.withOpacity(.7), size: 24),
+              ])),
+          );
+        }));
+  }
 }
 
-// ============================================================
+// AVATAR
+class _AvatarPainter extends CustomPainter {
+  final double pulse, orbit;
+  _AvatarPainter(this.pulse, this.orbit);
+  double _c(double a) => 1 - a*a/2 + a*a*a*a/24;
+  double _s(double a) => a - a*a*a/6 + a*a*a*a*a/120;
+
+  @override
+  void paint(Canvas canvas, Size s) {
+    final cx = s.width/2, cy = s.height/2, r = s.width/2;
+    canvas.drawCircle(Offset(cx,cy), r, Paint()..shader =
+      RadialGradient(colors: [const Color(0xFF1A1A40), const Color(0xFF060612)])
+        .createShader(Rect.fromCircle(center: Offset(cx,cy), radius: r)));
+    for (int i = 0; i < 8; i++) {
+      final a = (i/8 + orbit) * 6.28318;
+      canvas.drawCircle(Offset(cx + r*.82*_c(a), cy + r*.82*_s(a)), i%2==0 ? 2.5 : 1.5,
+        Paint()..color = kCyan.withOpacity(i%2==0 ? .5+.3*pulse : .2));
+    }
+    canvas.drawCircle(Offset(cx,cy), r*(.78+.04*pulse),
+      Paint()..style=PaintingStyle.stroke..color=kCyan.withOpacity(.15+.1*pulse)..strokeWidth=1.2);
+    final body = Path()
+      ..moveTo(cx-r*.3,cy+r*.2)..lineTo(cx+r*.3,cy+r*.2)
+      ..lineTo(cx+r*.42,cy+r*.75)..lineTo(cx-r*.42,cy+r*.75)..close();
+    canvas.drawPath(body, Paint()..shader =
+      LinearGradient(colors:[const Color(0xFF1E1E50),kCyan.withOpacity(.2)],
+        begin:Alignment.topCenter,end:Alignment.bottomCenter)
+      .createShader(Rect.fromLTWH(cx-r*.42,cy+r*.2,r*.84,r*.55)));
+    canvas.drawPath(Path()..moveTo(cx-r*.1,cy+r*.2)..lineTo(cx,cy+r*.35)..lineTo(cx+r*.1,cy+r*.2),
+      Paint()..style=PaintingStyle.stroke..color=kCyan.withOpacity(.5)..strokeWidth=1.5..strokeCap=StrokeCap.round);
+    canvas.drawCircle(Offset(cx,cy-r*.18),r*.28, Paint()..shader =
+      RadialGradient(colors:[const Color(0xFF252560),const Color(0xFF0F0F30)])
+        .createShader(Rect.fromCircle(center:Offset(cx-r*.05,cy-r*.28),radius:r*.28)));
+    canvas.drawCircle(Offset(cx,cy-r*.18),r*.28,
+      Paint()..style=PaintingStyle.stroke..color=kCyan.withOpacity(.3)..strokeWidth=1.2);
+    final hair = Path()
+      ..addArc(Rect.fromCircle(center:Offset(cx,cy-r*.18),radius:r*.28),3.14159+.25,2.63)
+      ..lineTo(cx,cy-r*.18)..close();
+    canvas.drawPath(hair, Paint()..color=const Color(0xFF5030D0));
+    canvas.drawArc(Rect.fromCircle(center:Offset(cx-r*.07,cy-r*.38),radius:r*.08),3.8,1.4,false,
+      Paint()..style=PaintingStyle.stroke..color=kPurple.withOpacity(.5)..strokeWidth=2);
+    for (final dx in [-r*.1, r*.1]) {
+      canvas.drawCircle(Offset(cx+dx,cy-r*.2),3.5,
+        Paint()..color=kCyan..maskFilter=const MaskFilter.blur(BlurStyle.normal,2));
+      canvas.drawCircle(Offset(cx+dx,cy-r*.2),1.5,Paint()..color=Colors.white);
+    }
+    canvas.drawArc(Rect.fromCenter(center:Offset(cx,cy-r*.08),width:r*.22,height:r*.13),
+      .3,2.5,false,
+      Paint()..style=PaintingStyle.stroke..color=kCyan.withOpacity(.6)..strokeWidth=1.8..strokeCap=StrokeCap.round);
+    final badge = RRect.fromRectAndRadius(
+      Rect.fromCenter(center:Offset(cx,cy+r*.4),width:r*.5,height:r*.17),const Radius.circular(4));
+    canvas.drawRRect(badge,Paint()..color=kCyan.withOpacity(.12));
+    canvas.drawRRect(badge,Paint()..style=PaintingStyle.stroke..color=kCyan.withOpacity(.45)..strokeWidth=1);
+  }
+  @override
+  bool shouldRepaint(_AvatarPainter o) => o.pulse != pulse || o.orbit != orbit;
+}
+
+class _AnimatedAvatar extends StatefulWidget {
+  const _AnimatedAvatar();
+  @override
+  State<_AnimatedAvatar> createState() => _AnimatedAvatarState();
+}
+
+class _AnimatedAvatarState extends State<_AnimatedAvatar> with TickerProviderStateMixin {
+  late AnimationController _p, _o;
+  @override
+  void initState() {
+    super.initState();
+    _p = AnimationController(vsync: this, duration: const Duration(milliseconds: 1600))..repeat(reverse: true);
+    _o = AnimationController(vsync: this, duration: const Duration(seconds: 10))..repeat();
+  }
+  @override
+  void dispose() { _p.dispose(); _o.dispose(); super.dispose(); }
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Listenable.merge([_p, _o]),
+    builder: (_, __) => CustomPaint(size: const Size(130,130), painter: _AvatarPainter(_p.value, _o.value)));
+}
+
 // ABOUT TAB
-// ============================================================
 class AboutTab extends StatelessWidget {
   const AboutTab({super.key});
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-      children: [
-        Align(alignment: Alignment.centerRight, child: themeToggleButton()),
-        const SizedBox(height: 20),
-        Center(
-          child: Container(
-            width: 80,
-            height: 80,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              gradient: const LinearGradient(colors: [kCyan, Color(0xFF0090A8)]),
-              boxShadow: [
-                BoxShadow(color: glow(kCyan, .35), blurRadius: 24, spreadRadius: 1)
-              ],
-            ),
-            child: const Icon(Icons.bolt_rounded, color: Colors.black, size: 40),
-          ),
-        ),
-        const SizedBox(height: 16),
-        Center(
-          child: Text('Welcome Sahrul',
-              style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w800,
-                  color: kWhite)),
-        ),
-        const SizedBox(height: 4),
-        Center(
-          child: Text('Device Control Center • v2.0.0',
-              style: TextStyle(
-                  fontSize: 12,
-                  color: glow(kCyan, .7),
-                  letterSpacing: 1,
-                  fontWeight: FontWeight.w600)),
-        ),
-        const SizedBox(height: 28),
-        _aboutCard(
-          Icons.shield_rounded,
-          kGreen,
-          'Anti Force-Close',
-          'Semua perintah root dibungkus pengaman berlapis. App tidak akan menutup mendadak meski perintah gagal.',
-        ),
-        const SizedBox(height: 12),
-        _aboutCard(
-          Icons.devices_rounded,
-          kCyan,
-          'Universal',
-          'Mendeteksi nama perangkat, jumlah core CPU, dan jalur sensor otomatis — mendukung beragam HP Android.',
-        ),
-        const SizedBox(height: 12),
-        _aboutCard(
-          Icons.warning_amber_rounded,
-          kYellow,
-          'Butuh Root',
-          'Sebagian besar fitur memerlukan akses root aktif. Berikan izin lewat aplikasi manajer root kamu.',
-        ),
-        const SizedBox(height: 28),
-        Center(
-          child: Text('Dibuat oleh Sahrul',
-              style: TextStyle(color: mut(.4), fontSize: 12)),
-        ),
-      ],
-    );
-  }
-
-  Widget _aboutCard(IconData ic, Color c, String title, String body) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-          color: kPanel,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: kBorder)),
-      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Container(
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-              color: glow(c, .1), borderRadius: BorderRadius.circular(12)),
-          child: Icon(ic, color: c, size: 22),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(title,
-                style: TextStyle(
-                    color: kWhite, fontSize: 14, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 4),
-            Text(body,
-                style: TextStyle(color: mut(.5), fontSize: 12, height: 1.4)),
-          ]),
-        ),
-      ]),
-    );
-  }
-}
-
-// ============================================================
-// SHARED WIDGETS (top-level)
-// ============================================================
-
-// Tombol toggle Night/Light untuk pojok kanan atas tiap tab.
-Widget themeToggleButton() => ValueListenableBuilder<bool>(
+    return ValueListenableBuilder<bool>(
       valueListenable: isNightNotifier,
-      builder: (_, night, __) => GestureDetector(
-        onTap: () => isNightNotifier.value = !isNightNotifier.value,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-          decoration: BoxDecoration(
-            color: glow(night ? kPurple : kYellow, .12),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: glow(night ? kPurple : kYellow, .4)),
-          ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(night ? Icons.dark_mode_rounded : Icons.light_mode_rounded,
-                size: 16, color: night ? kPurple : kYellow),
-            const SizedBox(width: 6),
-            Text(night ? 'Night' : 'Light',
-                style: TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w700,
-                    color: night ? kPurple : kYellow)),
-          ]),
-        ),
-      ),
-    );
-
-// Baris judul halaman + tombol Night/Light di kanan.
-Widget pageTitleRow(String title, String subtitle) => Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(title,
-                style: TextStyle(
-                    fontSize: 22, fontWeight: FontWeight.w800, color: kWhite)),
-            Text(subtitle, style: TextStyle(fontSize: 12.5, color: mut(.45))),
-          ]),
-        ),
-        const SizedBox(width: 12),
-        themeToggleButton(),
-      ],
-    );
-
-Widget _sectionTitle(String t, Color accent) => Row(children: [
-      Container(
-          width: 3,
-          height: 14,
-          decoration: BoxDecoration(
-              color: accent, borderRadius: BorderRadius.circular(2))),
-      const SizedBox(width: 8),
-      Text(t,
-          style: TextStyle(
-              color: kWhite,
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              letterSpacing: .3)),
-    ]);
-
-Widget _banner(String text, {Color color = kCyan}) => Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(13),
-      decoration: BoxDecoration(
-        color: glow(color, .08),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: glow(color, .4)),
-      ),
-      child: Text(text,
-          style: TextStyle(color: color, fontSize: 12.5, height: 1.3)),
-    );
-
-Widget _ring(IconData ic, String label, String value, Color c,
-    {double? pct}) {
-  return Container(
-    padding: const EdgeInsets.all(16),
-    decoration: BoxDecoration(
-      color: kPanel,
-      borderRadius: BorderRadius.circular(18),
-      border: Border.all(color: glow(c, .18)),
-      boxShadow: [
-        BoxShadow(color: glow(c, .06), blurRadius: 16, spreadRadius: -4)
-      ],
-    ),
-    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      SizedBox(
-        width: 36,
-        height: 36,
-        child: Stack(alignment: Alignment.center, children: [
-          if (pct != null)
-            SizedBox(
-              width: 36,
-              height: 36,
-              child: CircularProgressIndicator(
-                value: pct.clamp(0.0, 1.0),
-                strokeWidth: 2.5,
-                backgroundColor: mut(.06),
-                valueColor: AlwaysStoppedAnimation(c),
-              ),
-            )
-          else
-            Container(
-                width: 36,
-                height: 36,
-                decoration:
-                    BoxDecoration(shape: BoxShape.circle, color: glow(c, .08))),
-          Icon(ic, color: c, size: 16),
+      builder: (_, __, ___) => SingleChildScrollView(
+        padding: const EdgeInsets.all(18),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _pageHeader('Tentang', 'About This App', kGreen),
+          const SizedBox(height: 20),
+          Container(width: double.infinity, padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(colors:[kCyan.withOpacity(.08),kPurple.withOpacity(.06)],
+                begin:Alignment.topLeft, end:Alignment.bottomRight),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: kCyan.withOpacity(.2))),
+            child: Column(children: [
+              Stack(alignment: Alignment.bottomRight, children: [
+                const _AnimatedAvatar(),
+                Container(width:22,height:22,
+                  decoration:BoxDecoration(color:kGreen,shape:BoxShape.circle,border:Border.all(color:kPanel,width:2.5)),
+                  child:const Icon(Icons.check_rounded,color:Colors.white,size:12)),
+              ]),
+              const SizedBox(height: 14),
+              Text('Sahrul', style: TextStyle(color:kWhite,fontSize:24,fontWeight:FontWeight.w900,letterSpacing:-.5)),
+              const SizedBox(height: 4),
+              Text('Android Developer & Enthusiast', style: TextStyle(color:mut(.4),fontSize:13)),
+              const SizedBox(height: 14),
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                _chip('KernelSU', Icons.security_rounded, kGreen),
+                const SizedBox(width: 8),
+                _chip('MT6895', Icons.developer_board_rounded, kCyan),
+                const SizedBox(width: 8),
+                _chip('v2.0', Icons.rocket_launch_rounded, kPurple),
+              ]),
+            ])),
+          const SizedBox(height: 20),
+          _sectionLabel('SPESIFIKASI', kCyan),
+          const SizedBox(height: 10),
+          _info('Perangkat', 'Infinix GT 20 Pro', Icons.phone_android_rounded, kCyan),
+          _info('Chipset', 'Dimensity 8200 (MT6895)', Icons.developer_board_rounded, kPurple),
+          _info('RAM', '8 GB LPDDR5', Icons.memory_rounded, kBlue),
+          _info('Root', 'KernelSU Active', Icons.verified_rounded, kGreen),
+          _info('OS', 'Android + Ubuntu proot', Icons.android_rounded, kTeal),
+          const SizedBox(height: 20),
+          _sectionLabel('FITUR', kPurple),
+          const SizedBox(height: 10),
+          _feat(Icons.account_tree_rounded, kPurple, 'Nested Command Menu', 'Kontrol berlapis — governor, frekuensi, cache, thermal, network, I/O.'),
+          _feat(Icons.terminal_rounded, kCyan, 'Eksekusi Root Real', 'Semua perintah dijalankan langsung via su -c ke kernel MT6895.'),
+          _feat(Icons.dashboard_rounded, kBlue, 'Live Dashboard', 'CPU freq, governor, suhu, RAM, baterai — refresh tiap 3 detik.'),
+          _feat(Icons.lock_rounded, kYellow, 'Non-Root Compatible', 'Mode aman tanpa root — info tetap tampil, kontrol dikunci.'),
+          _feat(Icons.dark_mode_rounded, kOrange, 'Night / Light Mode', 'Ganti tema kapan saja dengan satu ketukan.'),
+          const SizedBox(height: 24),
+          Center(child: Text('Dibuat dengan ❤️ oleh Sahrul', style: TextStyle(color:mut(.3),fontSize:12))),
+          const SizedBox(height: 6),
+          Center(child: Text('Command Center © 2026', style: TextStyle(color:mut(.2),fontSize:11))),
+          const SizedBox(height: 20),
         ]),
       ),
-      const SizedBox(height: 12),
-      Text(value,
-          style: TextStyle(
-              color: c,
-              fontSize: 17,
-              fontWeight: FontWeight.w700,
-              fontFamily: 'monospace',
-              letterSpacing: -.5)),
-      const SizedBox(height: 3),
-      Text(label,
-          style: TextStyle(
-              color: mut(.38),
-              fontSize: 10.5,
-              fontWeight: FontWeight.w600,
-              letterSpacing: .8)),
+    );
+  }
+
+  Widget _chip(String l, IconData i, Color c) => Container(
+    padding: const EdgeInsets.symmetric(horizontal:10,vertical:6),
+    decoration: BoxDecoration(color:c.withOpacity(.1),borderRadius:BorderRadius.circular(10),border:Border.all(color:c.withOpacity(.3))),
+    child: Row(mainAxisSize:MainAxisSize.min,children:[Icon(i,color:c,size:13),const SizedBox(width:5),Text(l,style:TextStyle(color:c,fontSize:11,fontWeight:FontWeight.w700))]));
+
+  Widget _info(String label, String value, IconData icon, Color color) => Padding(
+    padding: const EdgeInsets.only(bottom:8),
+    child: Container(padding:const EdgeInsets.symmetric(horizontal:14,vertical:12),
+      decoration:BoxDecoration(color:kPanel,borderRadius:BorderRadius.circular(14),border:Border.all(color:kBorder)),
+      child:Row(children:[Icon(icon,color:color,size:17),const SizedBox(width:10),
+        Text(label,style:TextStyle(color:mut(.4),fontSize:12)),const Spacer(),
+        Text(value,style:TextStyle(color:kWhite,fontSize:12,fontWeight:FontWeight.w600))])));
+
+  Widget _feat(IconData ic, Color c, String title, String body) => Padding(
+    padding: const EdgeInsets.only(bottom:8),
+    child: Container(padding:const EdgeInsets.all(14),
+      decoration:BoxDecoration(color:kPanel,borderRadius:BorderRadius.circular(16),border:Border.all(color:kBorder)),
+      child:Row(crossAxisAlignment:CrossAxisAlignment.start,children:[
+        Container(padding:const EdgeInsets.all(9),decoration:BoxDecoration(color:c.withOpacity(.1),borderRadius:BorderRadius.circular(11)),child:Icon(ic,color:c,size:19)),
+        const SizedBox(width:12),
+        Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+          Text(title,style:TextStyle(color:kWhite,fontSize:13,fontWeight:FontWeight.w700)),
+          const SizedBox(height:3),
+          Text(body,style:TextStyle(color:mut(.4),fontSize:11.5,height:1.4)),
+        ])),
+      ])));
+}
+
+// SHARED
+Widget _pageHeader(String title, String subtitle, Color accent) {
+  return ValueListenableBuilder<bool>(
+    valueListenable: isNightNotifier,
+    builder: (_, night, __) => Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _AppIcon(size: 36),
+      const SizedBox(width: 12),
+      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: TextStyle(fontSize: 23, fontWeight: FontWeight.w900, color: kWhite, letterSpacing: -.5)),
+        Text(subtitle, style: TextStyle(fontSize: 11, color: mut(.35))),
+      ])),
+      GestureDetector(
+        onTap: () => isNightNotifier.value = !isNightNotifier.value,
+        child: AnimatedContainer(duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.all(9),
+          decoration: BoxDecoration(color: (night ? kPurple : kYellow).withOpacity(.12),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: (night ? kPurple : kYellow).withOpacity(.35))),
+          child: Icon(night ? Icons.dark_mode_rounded : Icons.light_mode_rounded,
+              size: 18, color: night ? kPurple : kYellow))),
     ]),
   );
 }
 
-Widget _controlCard(IconData ic, String title, String sub, String btnLabel,
-    Color c, VoidCallback onTap) {
-  return ValueListenableBuilder<bool>(
-    valueListenable: busyNotifier,
-    builder: (_, busy, __) => Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-          color: kPanel,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: kBorder)),
-      child: Row(children: [
-        Container(
-          padding: const EdgeInsets.all(11),
-          decoration: BoxDecoration(
-              color: glow(c, .1), borderRadius: BorderRadius.circular(13)),
-          child: Icon(ic, color: c, size: 22),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(title,
-                style: TextStyle(
-                    color: kWhite,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600)),
-            const SizedBox(height: 3),
-            Text(sub, style: TextStyle(color: mut(.45), fontSize: 11.5)),
-          ]),
-        ),
-        const SizedBox(width: 10),
-        ElevatedButton(
-          onPressed: busy ? null : onTap,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: glow(c, .15),
-            foregroundColor: c,
-            disabledBackgroundColor: mut(.05),
-            disabledForegroundColor: mut(.3),
-            side: BorderSide(color: busy ? Colors.transparent : c),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(11)),
-            elevation: 0,
-          ),
-          child: Text(btnLabel,
-              style: const TextStyle(
-                  fontSize: 11.5, fontWeight: FontWeight.bold)),
-        ),
-      ]),
-    ),
-  );
-}
+Widget _sectionLabel(String text, Color accent) => Padding(
+  padding: const EdgeInsets.only(bottom: 2),
+  child: Row(children: [
+    Container(width: 3, height: 12, decoration: BoxDecoration(color: accent, borderRadius: BorderRadius.circular(2))),
+    const SizedBox(width: 8),
+    Text(text, style: TextStyle(color: accent, fontSize: 10.5, fontWeight: FontWeight.w800, letterSpacing: 1.8)),
+  ]));
