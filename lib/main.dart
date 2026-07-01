@@ -10,7 +10,7 @@ void main() {
       statusBarColor: Colors.transparent,
       statusBarIconBrightness: Brightness.light,
     ));
-    runApp(const SahrulApp());
+    runApp(const XyzAiApp());
   }, (e, s) => debugPrint('ERR: $e'));
 }
 
@@ -43,7 +43,11 @@ Color glow(Color c, double o) => c.withOpacity(o);
 // ROOT HELPERS
 Future<bool> checkRoot() async {
   try {
-    final r = await Process.run('su', ['-c', 'id']);
+    // Timeout jaga-jaga: kalau proses su menggantung (mis. popup izin root
+    // tidak direspons user), app tidak boleh freeze selamanya menunggu.
+    final r = await Process.run('su', ['-c', 'id'])
+        .timeout(const Duration(seconds: 5), onTimeout: () =>
+            ProcessResult(0, 1, '', 'timeout'));
     return r.stdout.toString().contains('uid=0');
   } catch (_) { return false; }
 }
@@ -51,7 +55,9 @@ Future<bool> checkRoot() async {
 Future<String> runRoot(String cmd) async {
   if (!_root) return 'NO_ROOT';
   try {
-    final r = await Process.run('su', ['-c', 'sh -c ${_shellQuote(cmd)}']);
+    final r = await Process.run('su', ['-c', 'sh -c ${_shellQuote(cmd)}'])
+        .timeout(const Duration(seconds: 8), onTimeout: () =>
+            ProcessResult(0, 1, '', 'Command timeout (8s) — kemungkinan device lag atau perintah menggantung.'));
     final out = r.stdout.toString().trim();
     final err = r.stderr.toString().trim();
     if (out.isNotEmpty) return out;
@@ -69,7 +75,9 @@ Future<String> readSys(String path) async {
   } catch (_) {}
   if (_root) {
     try {
-      final r = await Process.run('su', ['-c', 'cat "$path"']);
+      final r = await Process.run('su', ['-c', 'cat "$path"'])
+          .timeout(const Duration(seconds: 4), onTimeout: () =>
+              ProcessResult(0, 1, '', 'timeout'));
       final out = r.stdout.toString().trim();
       if (out.isNotEmpty &&
           !out.contains('Permission denied') &&
@@ -84,7 +92,9 @@ Future<String> readSys(String path) async {
 // Baca properti Android (getprop) — jalan tanpa root
 Future<String> getProp(String key) async {
   try {
-    final r = await Process.run('getprop', [key]);
+    final r = await Process.run('getprop', [key])
+        .timeout(const Duration(seconds: 4), onTimeout: () =>
+            ProcessResult(0, 1, '', 'timeout'));
     return r.stdout.toString().trim();
   } catch (_) {
     if (_root) {
@@ -122,8 +132,36 @@ class DeviceInfo {
   bool hasCpuFreq = false;
 
   bool loaded = false;
+  bool _detecting = false; // guard anti tabrakan kalau detect() dipanggil paralel
 
+  // Notifier terpisah dari data itu sendiri — dipakai UI (About, Command,
+  // Dashboard) untuk auto-rebuild setiap kali hasil deteksi berubah, tanpa
+  // perlu setState manual tersebar di banyak tempat. Nilainya cuma dipakai
+  // sebagai sinyal "ada perubahan", bukan sebagai data sungguhan.
+  static final ValueNotifier<int> revision = ValueNotifier<int>(0);
+
+  // detect() AMAN dipanggil BERULANG KALI kapan pun (bukan cuma sekali saat
+  // splash). Dipanggil ulang setiap kali Dashboard/Command tab dibuka, dan
+  // bisa dipanggil manual lewat tombol refresh — sehingga app selalu
+  // mendeteksi ulang device tempatnya berjalan, realtime, bukan cache statis.
   Future<void> detect() async {
+    if (_detecting) return; // hindari 2 proses deteksi jalan bersamaan
+    _detecting = true;
+    try {
+      // Jaring pengaman terakhir: walau tiap readSys/getProp individual
+      // sudah punya timeout sendiri, deteksi memanggil puluhan di antaranya
+      // berurutan. Batas total 20 detik memastikan proses ini TIDAK PERNAH
+      // menggantung tanpa batas, apa pun yang terjadi di dalamnya.
+      await _detectInternal().timeout(const Duration(seconds: 20),
+          onTimeout: () => debugPrint('DeviceInfo.detect() timeout — data sebagian dipakai'));
+      loaded = true;
+      revision.value++; // broadcast: ada data baru, UI yang dengar akan rebuild
+    } finally {
+      _detecting = false;
+    }
+  }
+
+  Future<void> _detectInternal() async {
     // Info dasar via getprop (tanpa root)
     model      = await getProp('ro.product.model');
     brand      = await getProp('ro.product.manufacturer');
@@ -208,8 +246,6 @@ class DeviceInfo {
     ]) {
       if ((await readSys(p)).isNotEmpty) { dt2wPath = p; break; }
     }
-
-    loaded = true;
   }
 
   // Buat 3-4 pilihan frekuensi representatif dari daftar yang ada
@@ -227,14 +263,14 @@ class DeviceInfo {
 }
 
 // APP
-class SahrulApp extends StatelessWidget {
-  const SahrulApp({super.key});
+class XyzAiApp extends StatelessWidget {
+  const XyzAiApp({super.key});
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
       valueListenable: isNightNotifier,
       builder: (_, night, __) => MaterialApp(
-        title: 'Command Center',
+        title: 'Xyz_AI',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           useMaterial3: true,
@@ -315,7 +351,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
         ),
         const SizedBox(height: 36),
         FadeTransition(opacity: _fade, child: Column(children: [
-          Text('SAHRUL', style: TextStyle(color: kCyan, fontSize: 28,
+          Text('XYZ_AI', style: TextStyle(color: kCyan, fontSize: 28,
               fontWeight: FontWeight.w900, letterSpacing: 8)),
           const SizedBox(height: 4),
           Text('COMMAND CENTER', style: TextStyle(
@@ -444,6 +480,16 @@ class _RootShellState extends State<RootShell> {
   final _pages = const [DashboardTab(), CommandTab(), ToolsTab(), AboutTab()];
 
   @override
+  void initState() {
+    super.initState();
+    // Titik jaminan utama: begitu shell app ini terbentuk (app baru dibuka
+    // dari mana pun — cold start, dari background, dsb), device langsung
+    // dideteksi ulang. Ini memastikan poin "selalu mendeteksi device tempat
+    // aplikasi di-install" terpenuhi tak peduli tab mana yang aktif duluan.
+    DeviceInfo.i.detect();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
       valueListenable: isNightNotifier,
@@ -506,7 +552,15 @@ class _DashboardTabState extends State<DashboardTab> {
   late Timer _timer;
 
   @override
-  void initState() { super.initState(); _fetch(); _timer = Timer.periodic(const Duration(seconds: 3), (_) => _fetch()); }
+  void initState() {
+    super.initState();
+    // Deteksi ulang device SETIAP KALI tab ini dibuka (bukan cuma sekali
+    // saat splash) — supaya nama device & kemampuan hardware selalu
+    // mencerminkan kondisi terkini tempat app benar-benar berjalan.
+    DeviceInfo.i.detect();
+    _fetch();
+    _timer = Timer.periodic(const Duration(seconds: 3), (_) => _fetch());
+  }
 
   @override
   void dispose() { _timer.cancel(); super.dispose(); }
@@ -1320,7 +1374,14 @@ class AboutTab extends StatelessWidget {
   Widget build(BuildContext context) {
     return ValueListenableBuilder<bool>(
       valueListenable: isNightNotifier,
-      builder: (_, __, ___) => SingleChildScrollView(
+      builder: (_, __, ___) => ValueListenableBuilder<int>(
+        // Mendengarkan DeviceInfo.revision: setiap kali detect() selesai
+        // (dipanggil ulang dari Dashboard tiap tab dibuka), tab ini
+        // otomatis rebuild dengan data terbaru — tanpa hardcode apa pun.
+        valueListenable: DeviceInfo.revision,
+        builder: (_, __, ___) {
+          final d = DeviceInfo.i;
+          return SingleChildScrollView(
         padding: const EdgeInsets.all(18),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           _pageHeader('Tentang', 'About This App', kGreen),
@@ -1339,14 +1400,15 @@ class AboutTab extends StatelessWidget {
                   child:const Icon(Icons.check_rounded,color:Colors.white,size:12)),
               ]),
               const SizedBox(height: 14),
-              Text('Sahrul', style: TextStyle(color:kWhite,fontSize:24,fontWeight:FontWeight.w900,letterSpacing:-.5)),
+              Text('Xyz_AI', style: TextStyle(color:kWhite,fontSize:24,fontWeight:FontWeight.w900,letterSpacing:-.5)),
               const SizedBox(height: 4),
               Text('Android Developer & Enthusiast', style: TextStyle(color:mut(.4),fontSize:13)),
               const SizedBox(height: 14),
               Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-                _chip('KernelSU', Icons.security_rounded, kGreen),
+                _chip(isRootNotifier.value ? 'Root Active' : 'Non-Root', Icons.security_rounded,
+                    isRootNotifier.value ? kGreen : kYellow),
                 const SizedBox(width: 8),
-                _chip('MT6895', Icons.developer_board_rounded, kCyan),
+                _chip(d.platform == '---' ? '...' : d.platform, Icons.developer_board_rounded, kCyan),
                 const SizedBox(width: 8),
                 _chip('v2.0', Icons.rocket_launch_rounded, kPurple),
               ]),
@@ -1354,25 +1416,33 @@ class AboutTab extends StatelessWidget {
           const SizedBox(height: 20),
           _sectionLabel('SPESIFIKASI', kCyan),
           const SizedBox(height: 10),
-          _info('Perangkat', 'Infinix GT 20 Pro', Icons.phone_android_rounded, kCyan),
-          _info('Chipset', 'Dimensity 8200 (MT6895)', Icons.developer_board_rounded, kPurple),
-          _info('RAM', '8 GB LPDDR5', Icons.memory_rounded, kBlue),
-          _info('Root', 'KernelSU Active', Icons.verified_rounded, kGreen),
-          _info('OS', 'Android + Ubuntu proot', Icons.android_rounded, kTeal),
+          // Semua nilai di bawah ini REALTIME dari DeviceInfo.i — dibaca
+          // ulang dari device tempat app benar-benar berjalan, bukan
+          // hardcode satu perangkat tertentu. Kalau di-install di HP lain,
+          // nilai-nilai ini otomatis menyesuaikan.
+          _info('Perangkat', d.displayName, Icons.phone_android_rounded,
+              d.spoofSuspected ? kYellow : kCyan),
+          _info('Chipset', d.platform, Icons.developer_board_rounded, kPurple),
+          _info('CPU Core', '${d.cpuCores} core', Icons.memory_rounded, kBlue),
+          _info('Root', isRootNotifier.value ? 'Aktif' : 'Tidak aktif',
+              Icons.verified_rounded, isRootNotifier.value ? kGreen : kRed),
+          _info('Android', 'Android ${d.androidVer}', Icons.android_rounded, kTeal),
           const SizedBox(height: 20),
           _sectionLabel('FITUR', kPurple),
           const SizedBox(height: 10),
           _feat(Icons.account_tree_rounded, kPurple, 'Nested Command Menu', 'Kontrol berlapis — governor, frekuensi, cache, thermal, network, I/O.'),
-          _feat(Icons.terminal_rounded, kCyan, 'Eksekusi Root Real', 'Semua perintah dijalankan langsung via su -c ke kernel MT6895.'),
+          _feat(Icons.terminal_rounded, kCyan, 'Eksekusi Root Real', 'Semua perintah dijalankan langsung via su -c ke kernel perangkat.'),
           _feat(Icons.dashboard_rounded, kBlue, 'Live Dashboard', 'CPU freq, governor, suhu, RAM, baterai — refresh tiap 3 detik.'),
           _feat(Icons.lock_rounded, kYellow, 'Non-Root Compatible', 'Mode aman tanpa root — info tetap tampil, kontrol dikunci.'),
           _feat(Icons.dark_mode_rounded, kOrange, 'Night / Light Mode', 'Ganti tema kapan saja dengan satu ketukan.'),
           const SizedBox(height: 24),
-          Center(child: Text('Dibuat dengan ❤️ oleh Sahrul', style: TextStyle(color:mut(.3),fontSize:12))),
+          Center(child: Text('Dibuat dengan ❤️ oleh Xyz_AI', style: TextStyle(color:mut(.3),fontSize:12))),
           const SizedBox(height: 6),
-          Center(child: Text('Command Center © 2026', style: TextStyle(color:mut(.2),fontSize:11))),
+          Center(child: Text('Xyz_AI © 2026', style: TextStyle(color:mut(.2),fontSize:11))),
           const SizedBox(height: 20),
         ]),
+          );
+        },
       ),
     );
   }
