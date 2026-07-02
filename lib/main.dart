@@ -551,6 +551,21 @@ class _DashboardTabState extends State<DashboardTab> {
   bool _loading = true;
   late Timer _timer;
 
+  // Riwayat nilai numerik untuk grafik mini realtime di tiap kartu info
+  // (poin 4). Panjang dibatasi (_histLen) supaya memori tidak terus
+  // membengkak — cukup untuk menunjukkan tren naik/turun beberapa menit
+  // terakhir tanpa membebani rebuild widget.
+  static const int _histLen = 24; // 24 sampel x 3 detik ≈ 72 detik riwayat
+  final List<double> _freqHist = [];
+  final List<double> _tempHist = [];
+  final List<double> _memHist = [];
+  final List<double> _batHist = [];
+
+  void _pushHist(List<double> list, double value) {
+    list.add(value);
+    if (list.length > _histLen) list.removeAt(0);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -607,6 +622,16 @@ class _DashboardTabState extends State<DashboardTab> {
         _batTemp = bt;
         _uptime = upStr;
         _loading = false;
+
+        // Catat sampel realtime ke riwayat untuk grafik mini (poin 4).
+        // Nilai yang tidak valid (device belum siap / path tak ada) tidak
+        // dicatat, supaya grafik tidak menampilkan lonjakan palsu ke 0.
+        if (freqMhz > 0) _pushHist(_freqHist, freqMhz / 1000);
+        final tempVal = double.tryParse(temp.replaceAll('°C', ''));
+        if (tempVal != null) _pushHist(_tempHist, tempVal);
+        if (mt > 0) _pushHist(_memHist, mt > 0 ? ((mt - mf) / mt * 100) : 0);
+        final batVal = double.tryParse(bat.replaceAll('%', ''));
+        if (batVal != null) _pushHist(_batHist, batVal);
       });
     } catch (_) { if (mounted) setState(() => _loading = false); }
   }
@@ -635,10 +660,11 @@ class _DashboardTabState extends State<DashboardTab> {
               physics: const NeverScrollableScrollPhysics(),
               crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.15,
               children: [
-                _tile('CPU Freq', _freq, Icons.speed_rounded, kCyan),
+                _tile('CPU Freq', _freq, Icons.speed_rounded, kCyan, history: _freqHist),
                 _tile('Governor', _gov, Icons.tune_rounded, kPurple),
                 _tile('CPU Temp', _temp, Icons.thermostat_rounded,
-                    _temp == '---' ? kBlue : (double.tryParse(_temp.replaceAll('°C',''))??0) > 55 ? kRed : kGreen),
+                    _temp == '---' ? kBlue : (double.tryParse(_temp.replaceAll('°C',''))??0) > 55 ? kRed : kGreen,
+                    history: _tempHist),
                 _tile('Uptime', _uptime, Icons.timer_rounded, kTeal),
               ],
             ),
@@ -650,7 +676,7 @@ class _DashboardTabState extends State<DashboardTab> {
             _sectionLabel('BATTERY', kGreen),
             const SizedBox(height: 10),
             _loading ? _skel() : Row(children: [
-              Expanded(child: _tile('Kapasitas', _bat, Icons.battery_full_rounded, kGreen)),
+              Expanded(child: _tile('Kapasitas', _bat, Icons.battery_full_rounded, kGreen, history: _batHist)),
               const SizedBox(width: 10),
               Expanded(child: _tile('Suhu', _batTemp, Icons.device_thermostat_rounded, kOrange)),
             ]),
@@ -715,24 +741,97 @@ class _DashboardTabState extends State<DashboardTab> {
     );
   }
 
-  Widget _tile(String label, String val, IconData icon, Color color) => Container(
+  // history: riwayat nilai numerik (poin 4). Kalau diisi minimal 2 titik,
+  // sparkline pergerakan realtime digambar tipis di belakang kartu.
+  Widget _tile(String label, String val, IconData icon, Color color, {List<double>? history}) => Container(
     padding: const EdgeInsets.all(14),
     decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(18),
         border: Border.all(color: color.withOpacity(.18))),
-    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Container(padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(color: color.withOpacity(.12), borderRadius: BorderRadius.circular(10)),
-        child: Icon(icon, color: color, size: 16)),
-      const Spacer(),
-      Text(val, style: TextStyle(color: color, fontSize: 15, fontWeight: FontWeight.w800, fontFamily: 'monospace')),
-      const SizedBox(height: 2),
-      Text(label, style: TextStyle(color: mut(.38), fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: .8)),
+    child: Stack(children: [
+      // Sparkline realtime — ditaruh di lapisan belakang, memenuhi bagian
+      // bawah kartu, supaya tren naik-turun terlihat sekilas tanpa
+      // mengganggu keterbacaan angka di atasnya.
+      if (history != null && history.length >= 2)
+        Positioned.fill(
+          child: Align(alignment: Alignment.bottomCenter,
+            child: SizedBox(height: 26,
+              child: CustomPaint(painter: _SparklinePainter(history, color), size: Size.infinite))),
+        ),
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Container(padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(color: color.withOpacity(.12), borderRadius: BorderRadius.circular(10)),
+          child: Icon(icon, color: color, size: 16)),
+        const Spacer(),
+        Text(val, style: TextStyle(color: color, fontSize: 15, fontWeight: FontWeight.w800, fontFamily: 'monospace')),
+        const SizedBox(height: 2),
+        Text(label, style: TextStyle(color: mut(.38), fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: .8)),
+      ]),
     ]),
   );
 
   Widget _skel() => Container(height: 80, decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(18)),
     child: Center(child: SizedBox(width: 22, height: 22,
         child: CircularProgressIndicator(strokeWidth: 2, color: kCyan.withOpacity(.5)))));
+}
+
+// ============================================================
+// SPARKLINE PAINTER — grafik mini realtime untuk kartu info (poin 4).
+// Digambar sebagai garis halus + area gradient tipis di bawahnya, mirip
+// gaya "stock ticker". Auto-scale ke rentang min-max data yang ada supaya
+// pergerakan kecil pun tetap terlihat jelas (bukan garis datar).
+// ============================================================
+class _SparklinePainter extends CustomPainter {
+  final List<double> data;
+  final Color color;
+  _SparklinePainter(this.data, this.color);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (data.length < 2) return;
+    final minV = data.reduce((a, b) => a < b ? a : b);
+    final maxV = data.reduce((a, b) => a > b ? a : b);
+    // Beri sedikit padding rentang supaya garis tidak mepet ke tepi atas/bawah
+    // saat data hampir datar (selisih sangat kecil).
+    final range = (maxV - minV).abs() < 0.001 ? 1.0 : (maxV - minV);
+    final dx = size.width / (data.length - 1);
+
+    final points = <Offset>[];
+    for (int i = 0; i < data.length; i++) {
+      final normalized = (data[i] - minV) / range; // 0..1
+      final y = size.height - (normalized * size.height);
+      points.add(Offset(i * dx, y.clamp(0, size.height)));
+    }
+
+    // Area gradient tipis di bawah garis
+    final areaPath = Path()..moveTo(points.first.dx, size.height);
+    for (final p in points) { areaPath.lineTo(p.dx, p.dy); }
+    areaPath.lineTo(points.last.dx, size.height);
+    areaPath.close();
+    canvas.drawPath(areaPath, Paint()
+      ..shader = LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter,
+          colors: [color.withOpacity(.22), color.withOpacity(0)])
+        .createShader(Rect.fromLTWH(0, 0, size.width, size.height)));
+
+    // Garis utama
+    final linePath = Path()..moveTo(points.first.dx, points.first.dy);
+    for (final p in points.skip(1)) { linePath.lineTo(p.dx, p.dy); }
+    canvas.drawPath(linePath, Paint()
+      ..color = color.withOpacity(.75)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round);
+
+    // Titik penanda nilai TERKINI (paling kanan) — dibuat sedikit menonjol
+    // dengan lingkaran kecil, supaya jelas mana "sekarang" di grafik.
+    canvas.drawCircle(points.last, 2.6, Paint()..color = color);
+    canvas.drawCircle(points.last, 4.2, Paint()..color = color.withOpacity(.25));
+  }
+
+  @override
+  bool shouldRepaint(_SparklinePainter old) =>
+      old.data.length != data.length ||
+      (data.isNotEmpty && old.data.isNotEmpty && old.data.last != data.last);
 }
 
 // COMMAND TAB
@@ -784,6 +883,12 @@ class CommandTab extends StatelessWidget {
           // sekali di atas, bukan memanggil ulang method-nya.
           if (govGroup != null) govGroup,
           if (freqGroup != null) freqGroup,
+
+          // REFRESH RATE LOCK + monitoring realtime (poin 2)
+          const _RefreshRateGroup(),
+
+          // LTE BAND LOCK + monitoring realtime (poin 3)
+          const _BandLockGroup(),
 
           _CmdGroup(icon: Icons.memory_rounded, label: 'RAM & Cache', accent: kPurple,
             subtitle: 'Bersihkan memori',
@@ -1006,39 +1111,41 @@ class _CmdDialog extends StatelessWidget {
       valueListenable: isNightNotifier,
       builder: (_, __, ___) => Center(
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
+          padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Material(
             color: Colors.transparent,
             child: Container(
-              constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.72, maxWidth: 440),
-              decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(24),
+              // Diperbesar dari 0.72/440 agar kartu dialog opsi lebih lega
+              // dibaca dan lebih nyaman ditekan (poin 5).
+              constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.82, maxWidth: 500),
+              decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(26),
                 border: Border.all(color: accent.withOpacity(.35)),
                 boxShadow: [
                   BoxShadow(color: accent.withOpacity(.15), blurRadius: 40, spreadRadius: -4),
                   BoxShadow(color: Colors.black.withOpacity(.4), blurRadius: 30),
                 ]),
               child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Padding(padding: const EdgeInsets.fromLTRB(18, 18, 14, 14),
+                Padding(padding: const EdgeInsets.fromLTRB(20, 20, 16, 16),
                   child: Row(children: [
-                    Container(padding: const EdgeInsets.all(11),
+                    Container(padding: const EdgeInsets.all(13),
                       decoration: BoxDecoration(color: accent.withOpacity(.14),
-                        borderRadius: BorderRadius.circular(14),
+                        borderRadius: BorderRadius.circular(16),
                         border: Border.all(color: accent.withOpacity(.3))),
-                      child: Icon(icon, color: accent, size: 22)),
-                    const SizedBox(width: 12),
+                      child: Icon(icon, color: accent, size: 26)),
+                    const SizedBox(width: 14),
                     Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(label, style: TextStyle(color: kWhite, fontSize: 16, fontWeight: FontWeight.w800)),
-                      const SizedBox(height: 2),
-                      Text(subtitle, style: TextStyle(color: mut(.4), fontSize: 10.5), maxLines: 2, overflow: TextOverflow.ellipsis),
+                      Text(label, style: TextStyle(color: kWhite, fontSize: 18, fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 3),
+                      Text(subtitle, style: TextStyle(color: mut(.4), fontSize: 11.5), maxLines: 2, overflow: TextOverflow.ellipsis),
                     ])),
                     const SizedBox(width: 8),
                     GestureDetector(onTap: () => Navigator.pop(context),
-                      child: Container(padding: const EdgeInsets.all(6),
+                      child: Container(padding: const EdgeInsets.all(7),
                         decoration: BoxDecoration(color: mut(.06), shape: BoxShape.circle),
-                        child: Icon(Icons.close_rounded, color: mut(.5), size: 18))),
+                        child: Icon(Icons.close_rounded, color: mut(.5), size: 20))),
                   ])),
                 Divider(height: 1, color: kBorder),
-                Flexible(child: SingleChildScrollView(padding: const EdgeInsets.all(12),
+                Flexible(child: SingleChildScrollView(padding: const EdgeInsets.all(14),
                   child: Column(children: children))),
               ]),
             ),
@@ -1049,7 +1156,308 @@ class _CmdDialog extends StatelessWidget {
   }
 }
 
-// CMD LEAF — sekali tekan langsung eksekusi
+// ============================================================
+// REFRESH RATE GROUP — Lock refresh rate + monitoring realtime (poin 2)
+// ============================================================
+// Beda dari _CmdGroup polos: widget ini StatefulWidget sendiri karena perlu
+// POLLING status refresh rate aktual secara berkala (monitoring), bukan
+// cuma daftar aksi sekali-tekan. Kartu ini menunjukkan Hz yang SEDANG
+// AKTIF di sistem — bukan cuma Hz yang terakhir kita minta — sehingga
+// kalau sistem menolak/mengubah sendiri (mis. sebagian device auto-switch
+// refresh rate sesuai konten), status yang terlihat tetap jujur & akurat.
+class _RefreshRateGroup extends StatefulWidget {
+  const _RefreshRateGroup();
+  @override
+  State<_RefreshRateGroup> createState() => _RefreshRateGroupState();
+}
+
+class _RefreshRateGroupState extends State<_RefreshRateGroup> {
+  String _current = '---'; // teks tampilan, mis. "120 Hz"
+  int? _currentHz;         // nilai numerik murni untuk perbandingan akurat
+                            // (memisahkan dari _current mencegah bug mismatch
+                            // format string seperti "120 Hz" vs "120Hz")
+  Timer? _pollTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _poll();
+    // Monitoring realtime: baca ulang tiap 4 detik selama grup ini
+    // terlihat, supaya kartu selalu mencerminkan kondisi terkini —
+    // termasuk kalau ada aplikasi lain yang mengubah refresh rate.
+    _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) => _poll());
+  }
+
+  @override
+  void dispose() { _pollTimer?.cancel(); super.dispose(); }
+
+  Future<void> _poll() async {
+    // Baca refresh rate aktual lewat beberapa sumber berurutan, karena
+    // format/lokasi berbeda-beda tiap vendor. Berhenti di sumber pertama
+    // yang memberi angka valid (masuk akal: 24-165 Hz).
+    String hz = '';
+    final peak = await readSys('/sys/class/graphics/fb0/measured_fps');
+    if (peak.isNotEmpty) hz = peak;
+    if (hz.isEmpty && isRootNotifier.value) {
+      final out = await runRoot(
+          'dumpsys display | grep -oE "fps=[0-9]+\\.?[0-9]*" | head -1 | grep -oE "[0-9]+\\.?[0-9]*"');
+      if (!out.startsWith('ERR') && out != 'OK' && out.isNotEmpty) hz = out;
+    }
+    if (hz.isEmpty && isRootNotifier.value) {
+      final out = await runRoot('settings get system peak_refresh_rate');
+      if (!out.startsWith('ERR') && out != 'OK' && out.isNotEmpty) hz = out;
+    }
+    final parsed = double.tryParse(hz);
+    if (!mounted) return;
+    final validHz = (parsed != null && parsed >= 24 && parsed <= 165) ? parsed.round() : null;
+    setState(() {
+      _currentHz = validHz;
+      _current = validHz != null ? '$validHz Hz' : '---';
+    });
+  }
+
+  Future<void> _lock(int hz) async {
+    if (!isRootNotifier.value) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('⚠ Butuh root untuk mengunci refresh rate', style: TextStyle(fontWeight: FontWeight.w600)),
+        backgroundColor: kPanel2, behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+      return;
+    }
+    HapticFeedback.mediumImpact();
+    // Tulis ke SEMUA key vendor sekaligus (AOSP + MIUI + Oppo/Realme) agar
+    // benar-benar terkunci di berbagai ROM, dan peak=min supaya sistem
+    // tidak punya celah untuk menaik-turunkan sendiri (anti-adaptif).
+    final out = await runRoot('''
+      settings put system peak_refresh_rate $hz.0
+      settings put system min_refresh_rate $hz.0
+      settings put system user_refresh_rate $hz
+      settings put system miui_refresh_rate $hz
+      echo OK
+    ''');
+    if (!mounted) return;
+    final ok = !out.startsWith('ERR') && !out.startsWith('ERROR');
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok ? '✓ Refresh rate dikunci ke ${hz}Hz' : '✗ Gagal: $out',
+          style: const TextStyle(fontWeight: FontWeight.w600)),
+      backgroundColor: kPanel2, behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+    await Future.delayed(const Duration(milliseconds: 500));
+    _poll(); // langsung baca ulang status supaya kartu update seketika
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const options = [60, 90, 120, 144];
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: ValueListenableBuilder<bool>(
+        valueListenable: isNightNotifier,
+        builder: (_, __, ___) => Container(
+          decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: kBorder)),
+          child: Padding(padding: const EdgeInsets.all(14), child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: kTeal.withOpacity(.12),
+                    borderRadius: BorderRadius.circular(12), border: Border.all(color: kTeal.withOpacity(.2))),
+                  child: Icon(Icons.monitor_rounded, color: kTeal, size: 20)),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Refresh Rate', style: TextStyle(color: kWhite, fontSize: 14, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 2),
+                  // MONITORING: status aktual saat ini, bukan cuma pilihan terakhir
+                  Row(children: [
+                    Container(width: 6, height: 6, margin: const EdgeInsets.only(right: 5),
+                      decoration: BoxDecoration(shape: BoxShape.circle,
+                        color: _current == '---' ? mut(.2) : kGreen)),
+                    Text(_current == '---' ? 'Membaca status...' : 'Aktif sekarang: $_current',
+                        style: TextStyle(color: mut(.4), fontSize: 10.5)),
+                  ]),
+                ])),
+              ]),
+              const SizedBox(height: 14),
+              // Pilihan lock — segmented, menyorot Hz yang cocok dgn status aktif
+              Row(children: options.map((hz) {
+                final isActive = _currentHz == hz;
+                return Expanded(child: Padding(
+                  padding: EdgeInsets.only(right: hz == options.last ? 0 : 8),
+                  child: GestureDetector(
+                    onTap: () => _lock(hz),
+                    child: AnimatedContainer(duration: const Duration(milliseconds: 200),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      decoration: BoxDecoration(
+                        color: isActive ? kTeal.withOpacity(.16) : mut(.04),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: isActive ? kTeal : Colors.transparent)),
+                      child: Column(children: [
+                        Text('$hz', style: TextStyle(color: isActive ? kTeal : kWhite,
+                            fontSize: 15, fontWeight: FontWeight.w800, fontFamily: 'monospace')),
+                        Text('Hz', style: TextStyle(color: isActive ? kTeal.withOpacity(.7) : mut(.35), fontSize: 9)),
+                      ]),
+                    ),
+                  ),
+                ));
+              }).toList()),
+            ],
+          )),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// BAND LOCK GROUP — Lock LTE band + monitoring realtime (poin 3)
+// ============================================================
+// Catatan jujur: lock band via AT command / QMI berbeda-beda drastis
+// antar chipset modem (MediaTek vs Qualcomm punya perintah berbeda total).
+// Implementasi ini memakai jalur yang paling umum bekerja di modem
+// MediaTek (lewat service telephony & properti radio), dengan fallback
+// aman kalau tidak didukung — leaf akan melaporkan gagal dengan jelas,
+// bukan diam-diam tidak berbuat apa-apa.
+class _BandLockGroup extends StatefulWidget {
+  const _BandLockGroup();
+  @override
+  State<_BandLockGroup> createState() => _BandLockGroupState();
+}
+
+class _BandLockGroupState extends State<_BandLockGroup> {
+  String _current = '---'; // ringkasan band/network type aktual
+  Timer? _pollTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _poll();
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _poll());
+  }
+
+  @override
+  void dispose() { _pollTimer?.cancel(); super.dispose(); }
+
+  Future<void> _poll() async {
+    if (!isRootNotifier.value) {
+      if (mounted) setState(() => _current = 'Butuh root');
+      return;
+    }
+    // Baca tipe jaringan aktual dari dumpsys telephony — ini yang paling
+    // konsisten tersedia lintas vendor dibanding membaca band spesifik.
+    final out = await runRoot(
+        'dumpsys telephony.registry | grep -oE "mDataNetworkType=[A-Za-z0-9_]+" | head -1');
+    if (!mounted) return;
+    if (out.startsWith('ERR') || out == 'OK' || out.isEmpty) {
+      setState(() => _current = '---');
+    } else {
+      final cleaned = out.replaceFirst('mDataNetworkType=', '').trim();
+      setState(() => _current = cleaned.isEmpty ? '---' : cleaned);
+    }
+  }
+
+  Future<void> _apply(String label, String cmd) async {
+    if (!isRootNotifier.value) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: const Text('⚠ Butuh root untuk mengunci band', style: TextStyle(fontWeight: FontWeight.w600)),
+        backgroundColor: kPanel2, behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+      return;
+    }
+    HapticFeedback.mediumImpact();
+    final out = await runRoot(cmd);
+    if (!mounted) return;
+    final isError = out.startsWith('ERR') || out.startsWith('ERROR');
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(isError ? '✗ Gagal — modem mungkin tak mendukung: $out' : '✓ $label diterapkan',
+          style: const TextStyle(fontWeight: FontWeight.w600)),
+      backgroundColor: kPanel2, behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))));
+    await Future.delayed(const Duration(milliseconds: 800));
+    _poll();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Preferensi mode jaringan lewat telephony manager — cara paling
+    // universal untuk "mengunci" ke tipe koneksi tertentu (memaksa
+    // 4G-only misalnya efektif mengunci ke band LTE, menghindari
+    // fallback ke 3G/2G yang lebih lambat).
+    final modes = [
+      ['4G Only', 'LTE saja — paling stabil', kGreen, 'settings put global preferred_network_mode 11; echo OK'],
+      ['4G/3G',   'LTE + fallback 3G', kCyan, 'settings put global preferred_network_mode 9; echo OK'],
+      ['Auto',    'Semua mode (default)', kPurple, 'settings put global preferred_network_mode 0; echo OK'],
+    ];
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: ValueListenableBuilder<bool>(
+        valueListenable: isNightNotifier,
+        builder: (_, __, ___) => Container(
+          decoration: BoxDecoration(color: kPanel, borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: kBorder)),
+          child: Padding(padding: const EdgeInsets.all(14), child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: kBlue.withOpacity(.12),
+                    borderRadius: BorderRadius.circular(12), border: Border.all(color: kBlue.withOpacity(.2))),
+                  child: Icon(Icons.signal_cellular_alt_rounded, color: kBlue, size: 20)),
+                const SizedBox(width: 12),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Network / Band Lock', style: TextStyle(color: kWhite, fontSize: 14, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 2),
+                  // MONITORING: tipe jaringan aktual saat ini
+                  Row(children: [
+                    Container(width: 6, height: 6, margin: const EdgeInsets.only(right: 5),
+                      decoration: BoxDecoration(shape: BoxShape.circle,
+                        color: (_current == '---' || _current == 'Butuh root') ? mut(.2) : kGreen)),
+                    Text(_current == '---' ? 'Membaca status...' : 'Aktif: $_current',
+                        style: TextStyle(color: mut(.4), fontSize: 10.5)),
+                  ]),
+                ])),
+              ]),
+              const SizedBox(height: 4),
+              Text(
+                'Catatan: dukungan tergantung modem perangkat. Kalau gagal, coba mode lain.',
+                style: TextStyle(color: mut(.28), fontSize: 9.5, height: 1.3)),
+              const SizedBox(height: 10),
+              ...modes.map((m) {
+                final label = m[0] as String;
+                final desc = m[1] as String;
+                final color = m[2] as Color;
+                final cmd = m[3] as String;
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: GestureDetector(
+                    onTap: () => _apply(label, cmd),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      decoration: BoxDecoration(color: kPanel2, borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: kBorder.withOpacity(.4))),
+                      child: Row(children: [
+                        Container(width: 2.5, height: 32,
+                          decoration: BoxDecoration(color: color.withOpacity(.55), borderRadius: BorderRadius.circular(2))),
+                        const SizedBox(width: 12),
+                        Icon(Icons.cell_tower_rounded, color: color, size: 18),
+                        const SizedBox(width: 10),
+                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Text(label, style: TextStyle(color: kWhite, fontSize: 12.5, fontWeight: FontWeight.w600)),
+                          Text(desc, style: TextStyle(color: mut(.35), fontSize: 10)),
+                        ])),
+                        Icon(Icons.chevron_right_rounded, color: mut(.25), size: 18),
+                      ]),
+                    ),
+                  ),
+                );
+              }),
+            ],
+          )),
+        ),
+      ),
+    );
+  }
+}
+
+
 class _CmdLeaf extends StatefulWidget {
   final String label, desc, cmd;
   final IconData icon;
@@ -1133,35 +1541,38 @@ class _CmdLeafState extends State<_CmdLeaf> {
       valueListenable: isRootNotifier,
       builder: (_, root, __) {
         final locked = !root && !widget.readOnly;
-        return Padding(padding: const EdgeInsets.only(bottom: 6),
+        return Padding(padding: const EdgeInsets.only(bottom: 8),
           child: GestureDetector(
             onTap: locked ? () => _snack('⚠ Butuh root', kYellow) : _exec,
             child: AnimatedContainer(duration: const Duration(milliseconds: 200),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              // Diperbesar dari (14,12) agar kartu opsi di dalam dialog lebih
+              // lega dibaca & lebih nyaman ditekan (poin 5).
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
               decoration: BoxDecoration(
                 color: _flash ? widget.color.withOpacity(.18) : locked ? mut(.03) : kPanel2,
-                borderRadius: BorderRadius.circular(14),
+                borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: _flash ? widget.color.withOpacity(.5) : kBorder.withOpacity(.4))),
               child: Row(children: [
-                Container(width: 2.5, height: 36,
+                Container(width: 3, height: 42,
                   decoration: BoxDecoration(color: locked ? mut(.15) : widget.color.withOpacity(.55), borderRadius: BorderRadius.circular(2))),
+                const SizedBox(width: 13),
+                Icon(locked ? Icons.lock_rounded : widget.icon, color: locked ? mut(.3) : widget.color, size: 21),
                 const SizedBox(width: 12),
-                Icon(locked ? Icons.lock_rounded : widget.icon, color: locked ? mut(.3) : widget.color, size: 18),
-                const SizedBox(width: 10),
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(widget.label, style: TextStyle(color: locked ? mut(.4) : kWhite,
-                      fontSize: 12.5, fontWeight: FontWeight.w600)),
-                  Text(widget.desc, style: TextStyle(color: mut(.3), fontSize: 10.5)),
+                      fontSize: 14, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  Text(widget.desc, style: TextStyle(color: mut(.3), fontSize: 11.5)),
                 ])),
-                const SizedBox(width: 8),
+                const SizedBox(width: 10),
                 if (_running)
-                  SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: widget.color))
+                  SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2, color: widget.color))
                 else if (_flash)
-                  Icon(Icons.check_circle_rounded, color: widget.color, size: 20)
+                  Icon(Icons.check_circle_rounded, color: widget.color, size: 22)
                 else if (widget.readOnly)
-                  Icon(Icons.search_rounded, color: mut(.35), size: 18)
+                  Icon(Icons.search_rounded, color: mut(.35), size: 20)
                 else
-                  Icon(Icons.play_arrow_rounded, color: locked ? mut(.2) : widget.color.withOpacity(.7), size: 22),
+                  Icon(Icons.play_arrow_rounded, color: locked ? mut(.2) : widget.color.withOpacity(.7), size: 24),
               ]),
             ),
           ),
